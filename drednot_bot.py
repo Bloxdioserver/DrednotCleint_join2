@@ -388,8 +388,15 @@ def start_bot_session():
             accept_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'modal-container')]//button[contains(., 'Accept')]")))
             driver.execute_script(JS_CLICK_SCRIPT, accept_button); print("[SETUP] Clicked 'Accept' on notice.")
             if ANONYMOUS_LOGIN_KEY:
-                # ... (Anonymous login logic) ...
-                raise NotImplementedError("Anonymous key login needs to be re-verified")
+                log_event("Attempting login with key."); print("[SETUP] Attempting to log in with anonymous key.")
+                link = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(., 'Restore old anonymous key')]")))
+                driver.execute_script(JS_CLICK_SCRIPT, link); print("[SETUP] Clicked 'Restore old anonymous key'.")
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.modal-window input[maxlength="24"]'))).send_keys(ANONYMOUS_LOGIN_KEY)
+                submit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[.//h2[text()='Restore Account Key']]//button[contains(@class, 'btn-green')]")))
+                driver.execute_script(JS_CLICK_SCRIPT, submit_btn); print("[SETUP] Submitted key.")
+                wait.until(EC.any_of(EC.presence_of_element_located((By.ID, "chat-input")),EC.presence_of_element_located((By.XPATH, "//h2[text()='Login Failed']"))))
+                if driver.find_elements(By.XPATH, "//h2[text()='Login Failed']"): raise InvalidKeyError("Login Failed! Key may be invalid.")
+                print("✅ [SETUP] Successfully logged in with key."); bot_state.log_event("Login with key successful.")
             else:
                 bot_state.log_event("Playing as new guest (no key provided).")
                 play_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Play Anonymously')]")));
@@ -431,9 +438,17 @@ def run_bot_lifecycle():
             # We wait here. The loop will only continue if start_bot_session throws an exception.
             # A graceful shutdown mechanism could signal this event.
             stop_event.wait()
+        except InvalidKeyError as e:
+            handle_critical_error("Invalid Anonymous Key", e)
+            print("FATAL: The provided Anonymous Key is invalid. The bot will not restart. Please fix the key and restart the script manually.")
+            stop_event.set() # Stop all threads
+            break # Exit the lifecycle loop
         except Exception as e:
             handle_critical_error("in main bot session", e)
         finally:
+            if stop_event.is_set():
+                break # Exit if a fatal, non-recoverable error occurred
+
             global driver
             if rejoin_timer: rejoin_timer.cancel()
             if driver:
