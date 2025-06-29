@@ -21,7 +21,7 @@ from selenium.common.exceptions import WebDriverException, TimeoutException, NoS
 API_KEY = 'drednot123'
 # Optional: Use a restore key to have a consistent name for your bot.
 # Leave as None or '' to join as a new guest every time.
-ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT' # Replace with your bot's key if you have one.
+ANONYMOUS_LOGIN_KEY = '' # Replace with your bot's key if you have one.
 
 # --- GLOBAL STATE & LOCKS ---
 driver = None
