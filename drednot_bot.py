@@ -1,6 +1,5 @@
-# drednot_bot.py (Version 4.0 - Proactive Joiner Bot)
+# drednot_bot.py (Version 4.1 - With Graceful Restart)
 # A standalone bot that waits in a default ship and joins a new one on command.
-# All economy-related features have been removed for a focused purpose.
 
 import os
 import re
@@ -22,25 +21,28 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # --- CONFIGURATION ---
-API_KEY = 'drednot123' # For on-demand join requests
-ANONYMOUS_LOGIN_KEY = '' # Bot's primary login key
-DEFAULT_SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc' # The "waiting room" ship
+API_KEY = 'drednot123'
+ANONYMOUS_LOGIN_KEY = ''
+DEFAULT_SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
 
 MESSAGE_DELAY_SECONDS = 1.2
 ZWSP = '\u200B'
-INACTIVITY_TIMEOUT_SECONDS = 5 * 60 # Increased to 5 mins for less frequent rejoins
+INACTIVITY_TIMEOUT_SECONDS = 5 * 60
 MAIN_LOOP_POLLING_INTERVAL_SECONDS = 1.5
 
 # --- GLOBAL STATE ---
-SHIP_TO_JOIN_URL = DEFAULT_SHIP_INVITE_LINK # The URL the bot will try to join on next restart
+SHIP_TO_JOIN_URL = DEFAULT_SHIP_INVITE_LINK
 message_queue = queue.Queue(maxsize=20)
 driver_lock = Lock()
 inactivity_timer = None
 driver = None
 BOT_STATE = {"status": "Initializing...", "current_ship_id": "N/A", "last_join_request": "None yet.", "event_log": deque(maxlen=20)}
 
+# --- NEW: Thread-safe flag for signaling a restart ---
+RESTART_REQUESTED = False
+RESTART_LOCK = Lock()
+
 # --- JAVASCRIPT INJECTION (SIMPLIFIED) ---
-# This script now ONLY looks for the "Joined ship" event.
 MUTATION_OBSERVER_SCRIPT = """
     console.log('[Bot-JS] Initializing simplified MutationObserver...');
     window.py_bot_events = [];
@@ -98,24 +100,29 @@ def health_check():
     """
     return Response(html, mimetype='text/html')
 
-def trigger_rejoin_to_new_ship(target_ship_id):
-    global SHIP_TO_JOIN_URL, driver
+# --- MODIFIED: This function now signals a restart instead of forcing one. ---
+def signal_rejoin_to_new_ship(target_ship_id):
+    global SHIP_TO_JOIN_URL, RESTART_REQUESTED
+    
     clean_ship_id = re.sub(r'[^a-zA-Z0-9{} ]', '', target_ship_id)
     new_url = f"https://drednot.io/s/{clean_ship_id}"
-    with driver_lock:
-        log_event(f"JOIN REQ: Received for {target_ship_id}."); print(f"[JOIN REQ] Received for {target_ship_id}.")
+    
+    with RESTART_LOCK:
+        log_event(f"JOIN REQ: Received for {target_ship_id}. Signaling for restart.")
+        print(f"[JOIN REQ] Received for {target_ship_id}. Signaling for restart.")
+        
         BOT_STATE["last_join_request"] = f"{target_ship_id} at {datetime.now().strftime('%H:%M:%S')}"
         SHIP_TO_JOIN_URL = new_url
-        BOT_STATE["status"] = f"Switching to ship {target_ship_id}..."
-        if driver: driver.quit()
+        BOT_STATE["status"] = f"Signaled to join {target_ship_id}..."
+        RESTART_REQUESTED = True
 
 @flask_app.route('/join-request', methods=['POST'])
 def handle_join_request():
     if request.headers.get('x-api-key') != API_KEY: return Response('{"error": "Invalid API key"}', status=401, mimetype='application/json')
     data = request.get_json();
     if not data or 'shipId' not in data: return Response('{"error": "Missing shipId"}', status=400, mimetype='application/json')
-    threading.Thread(target=trigger_rejoin_to_new_ship, args=(data['shipId'],)).start()
-    return Response('{"status": "Join request accepted, bot is restarting to join."}', status=200, mimetype='application/json')
+    threading.Thread(target=signal_rejoin_to_new_ship, args=(data['shipId'],)).start()
+    return Response('{"status": "Join signal sent to bot."}', status=200, mimetype='application/json')
 
 def run_flask():
     port = int(os.environ.get("PORT", 8000)); print(f"Joiner Bot API listening on port {port}"); flask_app.run(host='0.0.0.0', port=port)
@@ -139,13 +146,14 @@ def reset_inactivity_timer():
     inactivity_timer = threading.Timer(INACTIVITY_TIMEOUT_SECONDS, attempt_soft_rejoin)
     inactivity_timer.start()
 def attempt_soft_rejoin():
-    log_event("Game inactivity detected. Triggering restart to rejoin."); print(f"[REJOIN] No activity for {INACTIVITY_TIMEOUT_SECONDS}s. Triggering full restart.")
-    global driver;
-    if driver: driver.quit()
+    log_event("Game inactivity detected. Signaling for restart to rejoin."); print(f"[REJOIN] No activity for {INACTIVITY_TIMEOUT_SECONDS}s. Signaling for restart.")
+    with RESTART_LOCK:
+        global RESTART_REQUESTED
+        RESTART_REQUESTED = True
 
 # --- MAIN BOT LOGIC ---
 def start_bot(use_key_login):
-    global driver
+    global driver, RESTART_REQUESTED
     BOT_STATE["status"] = "Launching Browser..."; log_event(f"Starting... Target: {SHIP_TO_JOIN_URL}")
     driver = setup_driver()
     with driver_lock:
@@ -175,6 +183,13 @@ def start_bot(use_key_login):
 
     BOT_STATE["status"] = "Waiting for join command..."; queue_reply("Joiner bot is waiting."); reset_inactivity_timer()
     while True:
+        # --- MODIFIED: Check for the restart signal at the start of the loop ---
+        with RESTART_LOCK:
+            if RESTART_REQUESTED:
+                print("[SYSTEM] Restart signal received. Exiting main loop gracefully.")
+                log_event("Restart signal received. Shutting down loop.")
+                break # Exit the while loop
+        
         try:
             with driver_lock: new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
             if new_events:
@@ -189,7 +204,7 @@ def start_bot(use_key_login):
 def run_bot_lifecycle():
     print("[SYSTEM] Delaying bot startup for 20 seconds to allow web server to stabilize...")
     time.sleep(20); print("[SYSTEM] Startup delay complete. Initializing bot lifecycle...")
-    global SHIP_TO_JOIN_URL
+    global SHIP_TO_JOIN_URL, RESTART_REQUESTED
     use_key_login = True; restart_count = 0; last_restart_time = time.time()
     while True:
         current_time = time.time()
@@ -209,6 +224,9 @@ def run_bot_lifecycle():
                 try: driver.quit()
                 except: pass
             driver = None
+            # --- MODIFIED: Reset the restart flag and the target URL here ---
+            with RESTART_LOCK:
+                RESTART_REQUESTED = False
             if SHIP_TO_JOIN_URL != DEFAULT_SHIP_INVITE_LINK:
                 print(f"[SYSTEM] Resetting next target URL to default: {DEFAULT_SHIP_INVITE_LINK}")
                 SHIP_TO_JOIN_URL = DEFAULT_SHIP_INVITE_LINK
