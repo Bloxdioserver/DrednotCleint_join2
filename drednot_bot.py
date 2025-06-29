@@ -1,5 +1,5 @@
-# drednot_bot.py (Version 4.1 - With Graceful Restart)
-# A standalone bot that waits in a default ship and joins a new one on command.
+# drednot_bot.py (Version 4.2 - In-Session Joining)
+# A standalone bot that waits in a default ship and performs a fast, in-session join on command.
 
 import os
 import re
@@ -27,47 +27,14 @@ DEFAULT_SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
 
 MESSAGE_DELAY_SECONDS = 1.2
 ZWSP = '\u200B'
-INACTIVITY_TIMEOUT_SECONDS = 5 * 60
-MAIN_LOOP_POLLING_INTERVAL_SECONDS = 1.5
+INACTIVITY_TIMEOUT_SECONDS = 10 * 60 # 10 minutes, since joining is now in-session
 
 # --- GLOBAL STATE ---
-SHIP_TO_JOIN_URL = DEFAULT_SHIP_INVITE_LINK
 message_queue = queue.Queue(maxsize=20)
 driver_lock = Lock()
 inactivity_timer = None
 driver = None
 BOT_STATE = {"status": "Initializing...", "current_ship_id": "N/A", "last_join_request": "None yet.", "event_log": deque(maxlen=20)}
-
-# --- NEW: Thread-safe flag for signaling a restart ---
-RESTART_REQUESTED = False
-RESTART_LOCK = Lock()
-
-# --- JAVASCRIPT INJECTION (SIMPLIFIED) ---
-MUTATION_OBSERVER_SCRIPT = """
-    console.log('[Bot-JS] Initializing simplified MutationObserver...');
-    window.py_bot_events = [];
-    const targetNode = document.getElementById('chat-content');
-    if (!targetNode) { return; }
-    const callback = (mutationList, observer) => {
-        for (const mutation of mutationList) {
-            if (mutation.type === 'childList') {
-                for (const node of mutation.addedNodes) {
-                    if (node.nodeType !== 1 || node.tagName !== 'P') continue;
-                    const pText = node.textContent || "";
-                    if (pText.includes("Joined ship '")) {
-                        const match = pText.match(/{[A-Z\\d]+}/);
-                        if (match && match[0]) {
-                            window.py_bot_events.push({ type: 'ship_joined', id: match[0] });
-                        }
-                    }
-                }
-            }
-        }
-    };
-    const observer = new MutationObserver(callback);
-    observer.observe(targetNode, { childList: true });
-    console.log('[Bot-JS] Simplified MutationObserver is now active.');
-"""
 
 class InvalidKeyError(Exception): pass
 
@@ -75,17 +42,17 @@ def log_event(message):
     timestamp = datetime.now().strftime('%H:%M:%S')
     BOT_STATE["event_log"].appendleft(f"[{timestamp}] {message}")
 
-# --- BROWSER SETUP ---
+# --- BROWSER SETUP & FLASK (Mostly Unchanged) ---
 def find_chromium_executable():
     path = shutil.which('chromium') or shutil.which('chromium-browser')
     if path: return path
     raise FileNotFoundError("Could not find chromium or chromium-browser.")
+
 def setup_driver():
-    print("Launching headless browser with performance flags...")
-    chrome_options = Options(); chrome_options.add_argument("--headless=new"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--disable-extensions"); chrome_options.add_argument("--mute-audio"); chrome_options.add_argument("--disable-images"); chrome_options.add_argument("--blink-settings=imagesEnabled=false"); chrome_options.binary_location = find_chromium_executable()
+    print("Launching headless browser...")
+    chrome_options = Options(); chrome_options.add_argument("--headless=new"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--mute-audio"); chrome_options.add_argument("--disable-images"); chrome_options.add_argument("--blink-settings=imagesEnabled=false"); chrome_options.binary_location = find_chromium_executable()
     return webdriver.Chrome(options=chrome_options)
 
-# --- FLASK WEB SERVER ---
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
@@ -100,34 +67,21 @@ def health_check():
     """
     return Response(html, mimetype='text/html')
 
-# --- MODIFIED: This function now signals a restart instead of forcing one. ---
-def signal_rejoin_to_new_ship(target_ship_id):
-    global SHIP_TO_JOIN_URL, RESTART_REQUESTED
-    
-    clean_ship_id = re.sub(r'[^a-zA-Z0-9{} ]', '', target_ship_id)
-    new_url = f"https://drednot.io/s/{clean_ship_id}"
-    
-    with RESTART_LOCK:
-        log_event(f"JOIN REQ: Received for {target_ship_id}. Signaling for restart.")
-        print(f"[JOIN REQ] Received for {target_ship_id}. Signaling for restart.")
-        
-        BOT_STATE["last_join_request"] = f"{target_ship_id} at {datetime.now().strftime('%H:%M:%S')}"
-        SHIP_TO_JOIN_URL = new_url
-        BOT_STATE["status"] = f"Signaled to join {target_ship_id}..."
-        RESTART_REQUESTED = True
-
 @flask_app.route('/join-request', methods=['POST'])
 def handle_join_request():
     if request.headers.get('x-api-key') != API_KEY: return Response('{"error": "Invalid API key"}', status=401, mimetype='application/json')
     data = request.get_json();
     if not data or 'shipId' not in data: return Response('{"error": "Missing shipId"}', status=400, mimetype='application/json')
-    threading.Thread(target=signal_rejoin_to_new_ship, args=(data['shipId'],)).start()
-    return Response('{"status": "Join signal sent to bot."}', status=200, mimetype='application/json')
+    
+    # NEW: Call the in-session join function
+    threading.Thread(target=perform_in_session_join, args=(data['shipId'],)).start()
+    
+    return Response('{"status": "Join request received and is being processed."}', status=200, mimetype='application/json')
 
 def run_flask():
     port = int(os.environ.get("PORT", 8000)); print(f"Joiner Bot API listening on port {port}"); flask_app.run(host='0.0.0.0', port=port)
 
-# --- HELPER & CORE FUNCTIONS ---
+# --- CORE LOGIC ---
 def queue_reply(message):
     try: message_queue.put(ZWSP + message, timeout=5)
     except queue.Full: print("[WARN] Message queue is full.")
@@ -143,21 +97,89 @@ def message_processor_thread():
 def reset_inactivity_timer():
     global inactivity_timer
     if inactivity_timer: inactivity_timer.cancel()
-    inactivity_timer = threading.Timer(INACTIVITY_TIMEOUT_SECONDS, attempt_soft_rejoin)
+    inactivity_timer = threading.Timer(INACTIVITY_TIMEOUT_SECONDS, lambda: driver.quit() if driver else None)
     inactivity_timer.start()
-def attempt_soft_rejoin():
-    log_event("Game inactivity detected. Signaling for restart to rejoin."); print(f"[REJOIN] No activity for {INACTIVITY_TIMEOUT_SECONDS}s. Signaling for restart.")
-    with RESTART_LOCK:
-        global RESTART_REQUESTED
-        RESTART_REQUESTED = True
 
-# --- MAIN BOT LOGIC ---
+# --- NEW: In-Session Join Function ---
+def perform_in_session_join(target_ship_id):
+    """Performs the exit, refresh, and join sequence without restarting the browser."""
+    with driver_lock:
+        if not driver:
+            log_event(f"ERROR: Join request for {target_ship_id} received, but browser is not running.")
+            return
+
+        reset_inactivity_timer()
+        log_event(f"JOIN REQ: Starting join sequence for {target_ship_id}.")
+        print(f"[JOIN] Starting join sequence for {target_ship_id}.")
+        BOT_STATE["last_join_request"] = f"{target_ship_id} at {datetime.now().strftime('%H:%M:%S')}"
+
+        try:
+            wait = WebDriverWait(driver, 15)
+            
+            # Step 1: Exit the current ship
+            BOT_STATE["status"] = "Exiting waiting room..."
+            print("[JOIN] Step 1: Exiting current ship.")
+            exit_button = wait.until(EC.element_to_be_clickable((By.ID, "exit_button")))
+            driver.execute_script("arguments[0].click();", exit_button)
+            
+            # Wait for main menu to be visible
+            wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
+            print("[JOIN] Successfully returned to main menu.")
+
+            # Step 2: Refresh the ship list
+            BOT_STATE["status"] = "Refreshing ship list..."
+            print("[JOIN] Step 2: Refreshing ship list.")
+            refresh_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Refresh')]")))
+            driver.execute_script("arguments[0].click();", refresh_button)
+            time.sleep(1.5) # Crucial delay to allow list to fetch data
+
+            # Step 3: Find and click the target ship
+            BOT_STATE["status"] = f"Searching for {target_ship_id}..."
+            print(f"[JOIN] Step 3: Searching for ship {target_ship_id}.")
+            
+            js_find_and_click = """
+                const targetId = arguments[0];
+                const idSpans = Array.from(document.querySelectorAll('.sy-id'));
+                const targetSpan = idSpans.find(span => span.textContent === targetId);
+                if (targetSpan) {
+                    const clickableDiv = targetSpan.parentElement;
+                    clickableDiv.click();
+                    return true;
+                }
+                return false;
+            """
+            was_clicked = driver.execute_script(js_find_and_click, target_ship_id)
+            
+            if not was_clicked:
+                raise RuntimeError(f"Could not find ship {target_ship_id} in the list.")
+
+            # Step 4: Confirm join was successful
+            wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
+            new_ship_id = driver.execute_script("for(const p of document.querySelectorAll('#chat-content p')){const t=p.textContent||'';if(t.includes(\"Joined ship '\")){const m=t.match(/{[A-Z\\d]+}/);if(m&&m[0])return m[0]}}return null;")
+            
+            BOT_STATE["current_ship_id"] = new_ship_id
+            BOT_STATE["status"] = f"In Ship: {new_ship_id}"
+            log_event(f"SUCCESS: Joined ship {new_ship_id}.")
+            print(f"✅ [JOIN] Successfully joined ship {new_ship_id}!")
+            queue_reply(f"Joiner bot has arrived at {new_ship_id}.")
+
+        except Exception as e:
+            error_msg = f"Join sequence for {target_ship_id} failed: {e}"
+            BOT_STATE["status"] = "Error during join"
+            log_event(f"ERROR: {error_msg}")
+            print(f"❌ [JOIN] {error_msg}")
+            traceback.print_exc()
+            # As a fallback, we quit the driver to let the main loop restart into the safe waiting room.
+            if driver:
+                driver.quit()
+
+# --- Initial Startup and Main Loop ---
 def start_bot(use_key_login):
-    global driver, RESTART_REQUESTED
-    BOT_STATE["status"] = "Launching Browser..."; log_event(f"Starting... Target: {SHIP_TO_JOIN_URL}")
+    global driver
+    BOT_STATE["status"] = "Launching Browser..."; log_event(f"Starting into waiting room: {DEFAULT_SHIP_INVITE_LINK}")
     driver = setup_driver()
     with driver_lock:
-        driver.get(SHIP_TO_JOIN_URL); print(f"Navigating to: {SHIP_TO_JOIN_URL}")
+        driver.get(DEFAULT_SHIP_INVITE_LINK); print(f"Navigating to: {DEFAULT_SHIP_INVITE_LINK}")
         wait = WebDriverWait(driver, 25)
         try:
             btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".modal-container .btn-green"))); driver.execute_script("arguments[0].click();", btn);
@@ -174,43 +196,28 @@ def start_bot(use_key_login):
         except Exception as e: log_event(f"Login failed critically: {e}"); raise e
         
         WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")));
-        driver.execute_script(MUTATION_OBSERVER_SCRIPT); log_event("In-game, chat observer active.")
-        
         found_id = driver.execute_script("for(const p of document.querySelectorAll('#chat-content p')){const t=p.textContent||'';if(t.includes(\"Joined ship '\")){const m=t.match(/{[A-Z\\d]+}/);if(m&&m[0])return m[0]}}return null;")
         if not found_id: raise RuntimeError("Failed to find Ship ID after joining.")
 
-        BOT_STATE["current_ship_id"] = found_id; log_event(f"Confirmed in ship: {found_id}"); print(f"✅ Successfully joined ship: {found_id}")
+        BOT_STATE["current_ship_id"] = found_id; log_event(f"Confirmed in waiting room: {found_id}"); print(f"✅ Successfully joined waiting room: {found_id}")
 
     BOT_STATE["status"] = "Waiting for join command..."; queue_reply("Joiner bot is waiting."); reset_inactivity_timer()
+    
+    # This loop now just keeps the bot alive. The main action happens in the Flask thread.
     while True:
-        # --- MODIFIED: Check for the restart signal at the start of the loop ---
-        with RESTART_LOCK:
-            if RESTART_REQUESTED:
-                print("[SYSTEM] Restart signal received. Exiting main loop gracefully.")
-                log_event("Restart signal received. Shutting down loop.")
-                break # Exit the while loop
-        
-        try:
-            with driver_lock: new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
-            if new_events:
-                reset_inactivity_timer()
-                for event in new_events:
-                    if event['type'] == 'ship_joined' and event['id'] != BOT_STATE["current_ship_id"]:
-                         BOT_STATE["current_ship_id"] = event['id']; log_event(f"Switched to new ship: {BOT_STATE['current_ship_id']}")
-        except WebDriverException: raise
-        time.sleep(MAIN_LOOP_POLLING_INTERVAL_SECONDS)
+        reset_inactivity_timer() # Keep petting the watchdog timer
+        time.sleep(60)
 
-# --- MAIN EXECUTION ---
+# --- Main Execution Block ---
 def run_bot_lifecycle():
-    print("[SYSTEM] Delaying bot startup for 20 seconds to allow web server to stabilize...")
-    time.sleep(20); print("[SYSTEM] Startup delay complete. Initializing bot lifecycle...")
-    global SHIP_TO_JOIN_URL, RESTART_REQUESTED
+    print("[SYSTEM] Delaying bot startup for 20 seconds...")
+    time.sleep(20); print("[SYSTEM] Startup delay complete. Initializing bot lifecycle.")
     use_key_login = True; restart_count = 0; last_restart_time = time.time()
     while True:
         current_time = time.time()
         if current_time - last_restart_time < 3600: restart_count += 1
         else: restart_count = 1
-        if restart_count > 10: print("CRITICAL: Bot is thrashing (restarting too quickly). Pausing for 5 minutes."); log_event("CRITICAL: Thrashing detected. Pausing."); time.sleep(300)
+        if restart_count > 10: print("CRITICAL: Bot is thrashing. Pausing for 5 minutes."); log_event("CRITICAL: Thrashing detected. Pausing."); time.sleep(300)
         
         try: start_bot(use_key_login)
         except InvalidKeyError as e:
@@ -224,12 +231,6 @@ def run_bot_lifecycle():
                 try: driver.quit()
                 except: pass
             driver = None
-            # --- MODIFIED: Reset the restart flag and the target URL here ---
-            with RESTART_LOCK:
-                RESTART_REQUESTED = False
-            if SHIP_TO_JOIN_URL != DEFAULT_SHIP_INVITE_LINK:
-                print(f"[SYSTEM] Resetting next target URL to default: {DEFAULT_SHIP_INVITE_LINK}")
-                SHIP_TO_JOIN_URL = DEFAULT_SHIP_INVITE_LINK
             time.sleep(5)
 
 if __name__ == "__main__":
