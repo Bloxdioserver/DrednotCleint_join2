@@ -1,4 +1,4 @@
-# joiner_bot.py
+# joiner_bot.py (Version 1.1 - With Robust Join Logic)
 # A standalone, minimal bot that listens for an HTTP request and joins a specific Drednot.io ship.
 
 import os
@@ -144,20 +144,31 @@ def perform_join_ship(new_ship_id):
         print(f"[JOIN] Attempting to join new ship: {new_ship_id}")
 
         try:
-            # Step 1: Ensure we are at the main menu.
+            # Step 1: Intelligently return to the main menu.
+            # This logic now correctly handles being in a game OR already at the menu.
+            print("[JOIN] Checking bot's current location...")
             try:
-                driver.find_element(By.ID, "exit_button").click()
-                print("[JOIN] Was in a game, clicked exit button.")
-                time.sleep(1) # Give it a moment to return to menu
-            except NoSuchElementException:
-                print("[JOIN] Not in a game, proceeding from main menu.")
+                # We use an explicit wait with a SHORT timeout (3 seconds).
+                # If the exit button is clickable within 3s, we are in a game.
+                exit_button = WebDriverWait(driver, 3).until(
+                    EC.element_to_be_clickable((By.ID, "exit_button"))
+                )
+                # If found, click it using JavaScript, which is more reliable.
+                driver.execute_script("arguments[0].click();", exit_button)
+                print("[JOIN] Bot was in a ship. Clicked 'Exit' to return to menu.")
+                # IMPORTANT: After clicking, wait for the shipyard to prove we are back at the menu.
+                WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, 'shipyard')))
 
+            except TimeoutException:
+                # If the wait times out, it means the exit button wasn't clickable.
+                # This is the EXPECTED case when the bot is already at the main menu.
+                print("[JOIN] Bot is already at the main menu. Proceeding.")
+                pass # Continue to the next step
+
+            # Step 2: Now that we are GUARANTEED to be at the main menu, find the ship.
             wait = WebDriverWait(driver, 15)
             wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
             
-            # Step 2: Use JavaScript to find the target ship and click it.
-            # This is more reliable than multiple Selenium commands.
-            # It will also click the 'refresh' button if the ship is not immediately visible.
             js_find_and_click = """
                 const sid = arguments[0];
                 const shipElements = Array.from(document.querySelectorAll('.sy-id'));
