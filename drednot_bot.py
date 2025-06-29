@@ -1,5 +1,5 @@
-# drednot_bot.py (Version 6.2 - Performance Tuned)
-# A highly reliable, controllable bot with proactive rejoin, improved error handling, and performance optimizations.
+# drednot_bot.py (Version 6.4 - High-Speed Join)
+# Implements an "Optimistic Join" strategy to dramatically reduce ship joining times.
 
 import os
 import re
@@ -87,7 +87,6 @@ def log_event(message):
     BOT_STATE["event_log"].appendleft(f"[{timestamp}] {message}")
 
 def handle_critical_error(err_message, exception):
-    """Centralized function for handling unrecoverable errors."""
     BOT_STATE["status"] = "Error! Restarting...";
     log_event(f"ERROR: {err_message} - {exception}")
     print(f"❌ [CRITICAL] {err_message}: {exception}")
@@ -95,13 +94,13 @@ def handle_critical_error(err_message, exception):
         driver.quit()
 
 # --- BROWSER SETUP ---
+# ... (Browser and Flask setup are unchanged) ...
 def find_chromium_executable():
     path = shutil.which('chromium') or shutil.which('chromium-browser')
     if path: return path
     raise FileNotFoundError("Could not find chromium or chromium-browser.")
 
 def setup_driver():
-    """Configures and launches a headless Chrome browser with performance optimizations."""
     print("Launching headless browser...")
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
@@ -120,10 +119,7 @@ def setup_driver():
     except FileNotFoundError as e:
         print(f"FATAL: {e}"); exit(1)
     return webdriver.Chrome(options=chrome_options)
-
-# --- FLASK WEB SERVER ---
 flask_app = Flask('')
-# ... (Flask routes are unchanged, but they now call the timer reset function) ...
 @flask_app.route('/')
 def health_check():
     html = f"""
@@ -172,6 +168,7 @@ def reset_proactive_rejoin_timer():
     rejoin_timer.start()
 
 def attempt_proactive_rejoin():
+    # ... (Proactive rejoin logic is unchanged) ...
     with driver_lock:
         if not driver: return
         ship_id_to_rejoin = BOT_STATE.get('current_ship_id')
@@ -189,7 +186,6 @@ def attempt_proactive_rejoin():
             except TimeoutException:
                 exit_button = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((By.ID, "exit_button")))
                 exit_button.click(); print("[REJOIN] Clicked exit button.")
-            # OPTIMIZATION: Reduced wait time
             wait = WebDriverWait(driver, 10)
             wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
             print(f"[REJOIN] At main menu. Searching for {ship_id_to_rejoin}...")
@@ -216,41 +212,66 @@ def message_processor_thread():
         except WebDriverException: pass
         time.sleep(MESSAGE_DELAY_SECONDS)
 
+# --- HIGH-SPEED JOIN LOGIC ---
 def perform_in_session_join(target_ship_id):
     with driver_lock:
-        if not driver: log_event(f"ERROR: Join request for {target_ship_id}, but browser is offline."); return
-        log_event(f"JOIN: Starting sequence for {target_ship_id}."); print(f"[JOIN] Starting sequence for {target_ship_id}.")
+        if not driver:
+            log_event(f"ERROR: Join request for {target_ship_id}, but browser is offline.")
+            return
+
+        log_event(f"JOIN: Starting sequence for {target_ship_id}.")
+        print(f"[JOIN] Starting sequence for {target_ship_id}.")
         BOT_STATE["last_command"] = f"!join {target_ship_id}"
+
         try:
-            # OPTIMIZATION: Reduced wait time from 15s to 10s
             wait = WebDriverWait(driver, 10)
-            BOT_STATE["status"] = "Exiting current ship..."; wait.until(EC.element_to_be_clickable((By.ID, "exit_button"))).click()
-            wait.until(EC.presence_of_element_located((By.ID, 'shipyard'))); print("[JOIN] At main menu.")
+            BOT_STATE["status"] = "Exiting current ship..."
+            wait.until(EC.element_to_be_clickable((By.ID, "exit_button"))).click()
+            wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
+            print("[JOIN] At main menu.")
+
+            # --- NEW: OPTIMISTIC JOIN ATTEMPT (THE FAST PATH) ---
+            print("[JOIN-OPT] Attempting optimistic join first...")
+            if driver.execute_script(JS_FIND_AND_CLICK_SHIP, target_ship_id):
+                print("[JOIN-OPT] Optimistic join SUCCESSFUL!")
+                wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
+                new_ship_id = driver.execute_script(JS_GET_SHIP_ID_FROM_CHAT)
+                BOT_STATE["current_ship_id"] = new_ship_id
+                BOT_STATE["status"] = f"In Ship: {new_ship_id}"
+                log_event(f"SUCCESS: Joined {new_ship_id}.")
+                print(f"✅ [JOIN] Successfully joined {new_ship_id}!")
+                queue_reply(f"Bot has arrived.")
+                return # Exit on success
+
+            # --- FALLBACK: REFRESH AND RETRY (THE SLOW PATH) ---
+            print("[JOIN-OPT] Optimistic join failed. Falling back to refresh-and-retry.")
             for attempt in range(2):
                 print(f"[JOIN] Refreshing ship list (Attempt {attempt + 1}/2)...")
                 BOT_STATE["status"] = f"Refreshing list (Attempt {attempt + 1})..."
                 wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Refresh')]"))).click()
-                # OPTIMIZATION: Reduced sleep from 2.0s to 1.0s
                 time.sleep(1.0)
                 if driver.execute_script(JS_FIND_AND_CLICK_SHIP, target_ship_id):
                     print(f"[JOIN] Found and clicked ship {target_ship_id} on attempt {attempt + 1}.")
                     wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
                     new_ship_id = driver.execute_script(JS_GET_SHIP_ID_FROM_CHAT)
-                    BOT_STATE["current_ship_id"] = new_ship_id; BOT_STATE["status"] = f"In Ship: {new_ship_id}"
-                    log_event(f"SUCCESS: Joined {new_ship_id}."); print(f"✅ [JOIN] Successfully joined {new_ship_id}!")
+                    BOT_STATE["current_ship_id"] = new_ship_id
+                    BOT_STATE["status"] = f"In Ship: {new_ship_id}"
+                    log_event(f"SUCCESS: Joined {new_ship_id}.")
+                    print(f"✅ [JOIN] Successfully joined {new_ship_id}!")
                     queue_reply(f"Bot has arrived.")
                     return
-            raise RuntimeError(f"Could not find ship {target_ship_id} after 2 attempts.")
+
+            raise RuntimeError(f"Could not find ship {target_ship_id} after all attempts.")
         except Exception as e:
             handle_critical_error("Join sequence failed", e)
 
 def perform_leave_ship():
+    # ... (Leave logic is unchanged) ...
     with driver_lock:
         if not driver: log_event("ERROR: Leave request received, but browser is offline."); return
         log_event("LEAVE: Starting leave sequence."); print("[LEAVE] Starting leave sequence.")
         BOT_STATE["last_command"] = "!leave"
         try:
-            # OPTIMIZATION: Reduced wait time from 5s to 3s for this simple action
             wait = WebDriverWait(driver, 3)
             BOT_STATE["status"] = "Leaving ship..."
             wait.until(EC.element_to_be_clickable((By.ID, "exit_button"))).click()
@@ -263,18 +284,18 @@ def perform_leave_ship():
             handle_critical_error("Leave sequence failed", e)
 
 def start_bot():
+    # ... (Start logic is unchanged) ...
     global driver
     BOT_STATE["status"] = "Launching Browser..."; log_event(f"Starting into waiting room: {DEFAULT_SHIP_INVITE_LINK}")
     driver = setup_driver()
     with driver_lock:
         driver.get(DEFAULT_SHIP_INVITE_LINK); print(f"Navigating to: {DEFAULT_SHIP_INVITE_LINK}")
-        wait = WebDriverWait(driver, 20) # Main login wait
+        wait = WebDriverWait(driver, 20)
         def js_click(element): driver.execute_script(JS_CLICK_SCRIPT, element)
         try:
             accept_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'modal-container')]//button[contains(., 'Accept')]")))
             js_click(accept_button); print("[SETUP] Clicked 'Accept' on notice.")
             if ANONYMOUS_LOGIN_KEY:
-                # Key login logic is unchanged
                 log_event("Attempting login with key."); print("[SETUP] Attempting to log in with anonymous key.")
                 link = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(., 'Restore old anonymous key')]")))
                 js_click(link); print("[SETUP] Clicked 'Restore old anonymous key'.")
@@ -290,7 +311,6 @@ def start_bot():
                 js_click(play_button)
                 print("[SETUP] Clicked 'Play Anonymously'.")
         except Exception as e: log_event(f"Login failed critically: {e}"); raise e
-        # OPTIMIZATION: Reduced wait for game load from 60s to 30s
         WebDriverWait(driver, 30).until(EC.presence_of_element_located((By.ID, "chat-input")))
         driver.execute_script(MUTATION_OBSERVER_SCRIPT); log_event("In-game, observer active.")
         ship_id_found = False; print("[SETUP] Finding Ship ID...")
@@ -299,7 +319,6 @@ def start_bot():
             ship_id_found = True
         else:
             start_time = time.time()
-            # OPTIMIZATION: Reduced polling time from 20s to 10s
             while time.time() - start_time < 10:
                 new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
                 if new_events: found_id = new_events[0]['id']; ship_id_found = True; break
@@ -313,9 +332,8 @@ def start_bot():
 
 # --- MAIN EXECUTION BLOCK ---
 def run_bot_lifecycle():
-    # OPTIMIZATION: Reduced startup delay from 20s to 5s
-    print("[SYSTEM] Delaying bot startup for 5 seconds...")
-    time.sleep(5); print("[SYSTEM] Startup delay complete. Initializing bot lifecycle.")
+    # ... (Main loop is unchanged) ...
+    print("[SYSTEM] Initializing bot lifecycle...")
     restart_count = 0; last_restart_time = time.time()
     while True:
         current_time = time.time()
