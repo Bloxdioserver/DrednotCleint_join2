@@ -1,5 +1,5 @@
-# drednot_bot.py (Version 4.2 - In-Session Joining / Keyless)
-# A standalone bot that waits in a default ship and performs a fast, in-session join on command.
+# drednot_bot.py (Version 4.3 - With Live Commands)
+# A controllable bot that waits in a ship and can join, leave, or speak on command.
 
 import os
 import re
@@ -22,8 +22,7 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # --- CONFIGURATION ---
 API_KEY = 'drednot123'
-# --- CHANGE: Key is now empty to force anonymous guest login ---
-ANONYMOUS_LOGIN_KEY = ''
+ANONYMOUS_LOGIN_KEY = '' # Set to '' to always log in as a new anonymous guest
 DEFAULT_SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
 
 MESSAGE_DELAY_SECONDS = 1.2
@@ -35,7 +34,7 @@ message_queue = queue.Queue(maxsize=20)
 driver_lock = Lock()
 inactivity_timer = None
 driver = None
-BOT_STATE = {"status": "Initializing...", "current_ship_id": "N/A", "last_join_request": "None yet.", "event_log": deque(maxlen=20)}
+BOT_STATE = {"status": "Initializing...", "current_ship_id": "N/A", "last_command": "None yet.", "event_log": deque(maxlen=20)}
 
 class InvalidKeyError(Exception): pass
 
@@ -43,41 +42,58 @@ def log_event(message):
     timestamp = datetime.now().strftime('%H:%M:%S')
     BOT_STATE["event_log"].appendleft(f"[{timestamp}] {message}")
 
-# --- BROWSER SETUP & FLASK ---
+# --- BROWSER SETUP ---
 def find_chromium_executable():
     path = shutil.which('chromium') or shutil.which('chromium-browser')
     if path: return path
     raise FileNotFoundError("Could not find chromium or chromium-browser.")
-
 def setup_driver():
     print("Launching headless browser...")
     chrome_options = Options(); chrome_options.add_argument("--headless=new"); chrome_options.add_argument("--no-sandbox"); chrome_options.add_argument("--disable-dev-shm-usage"); chrome_options.add_argument("--disable-gpu"); chrome_options.add_argument("--mute-audio"); chrome_options.add_argument("--disable-images"); chrome_options.add_argument("--blink-settings=imagesEnabled=false"); chrome_options.binary_location = find_chromium_executable()
     return webdriver.Chrome(options=chrome_options)
 
+# --- FLASK WEB SERVER ---
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
     html = f"""
     <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10">
-    <title>Joiner Bot Status</title><style>body{{font-family:'Courier New',monospace;background-color:#1e1e1e;color:#d4d4d4;padding:20px;}}.container{{max-width:800px;margin:auto;background-color:#252526;border:1px solid #373737;padding:20px;border-radius:8px;}}h1{{color:#4ec9b0;}}p{{line-height:1.6;}}.status-ok{{color:#73c991;}}.status-warn{{color:#dccd85;}}.status-err{{color:#f44747;}}.label{{color:#9cdcfe;font-weight:bold;}}ul{{list-style-type:none;padding-left:0;}}li{{background-color:#2d2d2d;margin-bottom:8px;padding:10px;border-radius:4px;}}</style></head>
-    <body><div class="container"><h1>Joiner Bot Status</h1>
+    <title>Interactive Bot Status</title><style>body{{font-family:'Courier New',monospace;background-color:#1e1e1e;color:#d4d4d4;padding:20px;}}.container{{max-width:800px;margin:auto;background-color:#252526;border:1px solid #373737;padding:20px;border-radius:8px;}}h1{{color:#4ec9b0;}}p{{line-height:1.6;}}.status-ok{{color:#73c991;}}.status-warn{{color:#dccd85;}}.status-err{{color:#f44747;}}.label{{color:#9cdcfe;font-weight:bold;}}ul{{list-style-type:none;padding-left:0;}}li{{background-color:#2d2d2d;margin-bottom:8px;padding:10px;border-radius:4px;}}</style></head>
+    <body><div class="container"><h1>Interactive Bot Status</h1>
     <p><span class="label">Status:</span> <span class="status-ok">{BOT_STATE['status']}</span></p>
     <p><span class="label">Current Ship ID:</span> {BOT_STATE['current_ship_id']}</p>
-    <p><span class="label">Last Join Request:</span> {BOT_STATE['last_join_request']}</p>
+    <p><span class="label">Last Command:</span> {BOT_STATE['last_command']}</p>
     <h2>Recent Events</h2><ul>{''.join(f'<li>{event}</li>' for event in BOT_STATE['event_log'])}</ul></div></body></html>
     """
     return Response(html, mimetype='text/html')
 
 @flask_app.route('/join-request', methods=['POST'])
 def handle_join_request():
-    if request.headers.get('x-api-key') != API_KEY: return Response('{"error": "Invalid API key"}', status=401, mimetype='application/json')
+    if request.headers.get('x-api-key') != API_KEY: return Response('{"error": "Invalid API key"}', status=401)
     data = request.get_json();
-    if not data or 'shipId' not in data: return Response('{"error": "Missing shipId"}', status=400, mimetype='application/json')
+    if not data or 'shipId' not in data: return Response('{"error": "Missing shipId"}', status=400)
     threading.Thread(target=perform_in_session_join, args=(data['shipId'],)).start()
-    return Response('{"status": "Join request received and is being processed."}', status=200, mimetype='application/json')
+    return Response('{"status": "Join request received."}', status=200)
+
+@flask_app.route('/leave-request', methods=['POST'])
+def handle_leave_request():
+    if request.headers.get('x-api-key') != API_KEY: return Response('{"error": "Invalid API key"}', status=401)
+    threading.Thread(target=perform_leave_ship).start()
+    return Response('{"status": "Leave request received."}', status=200)
+
+@flask_app.route('/say-request', methods=['POST'])
+def handle_say_request():
+    if request.headers.get('x-api-key') != API_KEY: return Response('{"error": "Invalid API key"}', status=401)
+    data = request.get_json();
+    if not data or 'message' not in data: return Response('{"error": "Missing message"}', status=400)
+    # The message is simply queued, no separate thread needed.
+    queue_reply(data['message'])
+    log_event(f"SAY REQ: Queued message: '{data['message']}'")
+    BOT_STATE["last_command"] = f"!say {data['message']}"
+    return Response('{"status": "Say request received."}', status=200)
 
 def run_flask():
-    port = int(os.environ.get("PORT", 8000)); print(f"Joiner Bot API listening on port {port}"); flask_app.run(host='0.0.0.0', port=port)
+    port = int(os.environ.get("PORT", 8000)); print(f"Interactive Bot API listening on port {port}"); flask_app.run(host='0.0.0.0', port=port)
 
 # --- CORE LOGIC ---
 def queue_reply(message):
@@ -98,59 +114,59 @@ def reset_inactivity_timer():
     inactivity_timer = threading.Timer(INACTIVITY_TIMEOUT_SECONDS, lambda: driver.quit() if driver else None)
     inactivity_timer.start()
 
+# --- LIVE COMMAND FUNCTIONS ---
 def perform_in_session_join(target_ship_id):
     with driver_lock:
-        if not driver:
-            log_event(f"ERROR: Join request for {target_ship_id} received, but browser is not running.")
-            return
-
+        if not driver: log_event(f"ERROR: Join request for {target_ship_id}, but browser is offline."); return
         reset_inactivity_timer()
-        log_event(f"JOIN REQ: Starting join sequence for {target_ship_id}.")
-        print(f"[JOIN] Starting join sequence for {target_ship_id}.")
-        BOT_STATE["last_join_request"] = f"{target_ship_id} at {datetime.now().strftime('%H:%M:%S')}"
-
+        log_event(f"JOIN: Starting sequence for {target_ship_id}."); print(f"[JOIN] Starting sequence for {target_ship_id}.")
+        BOT_STATE["last_command"] = f"!join {target_ship_id}"
         try:
             wait = WebDriverWait(driver, 15)
-            BOT_STATE["status"] = "Exiting waiting room..."
-            print("[JOIN] Step 1: Exiting current ship.")
-            exit_button = wait.until(EC.element_to_be_clickable((By.ID, "exit_button")))
-            driver.execute_script("arguments[0].click();", exit_button)
+            BOT_STATE["status"] = "Exiting current ship..."; print("[JOIN] Exiting ship.")
+            wait.until(EC.element_to_be_clickable((By.ID, "exit_button"))).click()
+            wait.until(EC.presence_of_element_located((By.ID, 'shipyard'))); print("[JOIN] At main menu.")
             
-            wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
-            print("[JOIN] Successfully returned to main menu.")
-
-            BOT_STATE["status"] = "Refreshing ship list..."
-            print("[JOIN] Step 2: Refreshing ship list.")
-            refresh_button = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Refresh')]")))
-            driver.execute_script("arguments[0].click();", refresh_button)
+            BOT_STATE["status"] = "Refreshing ship list..."; print("[JOIN] Refreshing list.")
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Refresh')]"))).click()
             time.sleep(1.5)
 
-            BOT_STATE["status"] = f"Searching for {target_ship_id}..."
-            print(f"[JOIN] Step 3: Searching for ship {target_ship_id}.")
-            
-            js_find_and_click = "const t=arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===t);if(s){s.parentElement.click();return true}return false"
-            was_clicked = driver.execute_script(js_find_and_click, target_ship_id)
-            
-            if not was_clicked:
-                raise RuntimeError(f"Could not find ship {target_ship_id} in the list.")
+            BOT_STATE["status"] = f"Searching for {target_ship_id}..."; print(f"[JOIN] Searching for {target_ship_id}.")
+            js_find = "const t=arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===t);if(s){s.parentElement.click();return true}return false"
+            if not driver.execute_script(js_find, target_ship_id): raise RuntimeError(f"Could not find ship {target_ship_id}.")
 
             wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
             new_ship_id = driver.execute_script("for(const p of document.querySelectorAll('#chat-content p')){const t=p.textContent||'';if(t.includes(\"Joined ship '\")){const m=t.match(/{[A-Z\\d]+}/);if(m&&m[0])return m[0]}}return null;")
             
-            BOT_STATE["current_ship_id"] = new_ship_id
-            BOT_STATE["status"] = f"In Ship: {new_ship_id}"
-            log_event(f"SUCCESS: Joined ship {new_ship_id}.")
-            print(f"✅ [JOIN] Successfully joined ship {new_ship_id}!")
+            BOT_STATE["current_ship_id"] = new_ship_id; BOT_STATE["status"] = f"In Ship: {new_ship_id}"
+            log_event(f"SUCCESS: Joined {new_ship_id}."); print(f"✅ [JOIN] Successfully joined {new_ship_id}!")
             queue_reply(f"Joiner bot has arrived.")
-
         except Exception as e:
-            error_msg = f"Join sequence for {target_ship_id} failed: {e}"
-            BOT_STATE["status"] = "Error during join"
-            log_event(f"ERROR: {error_msg}")
-            print(f"❌ [JOIN] {error_msg}")
+            BOT_STATE["status"] = "Error during join"; log_event(f"ERROR: Join failed: {e}"); print(f"❌ [JOIN] Join failed: {e}");
             if driver: driver.quit()
 
-def start_bot(use_key_login):
+def perform_leave_ship():
+    with driver_lock:
+        if not driver: log_event("ERROR: Leave request received, but browser is offline."); return
+        reset_inactivity_timer()
+        log_event("LEAVE: Starting leave sequence."); print("[LEAVE] Starting leave sequence.")
+        BOT_STATE["last_command"] = "!leave"
+        try:
+            wait = WebDriverWait(driver, 5)
+            BOT_STATE["status"] = "Leaving ship..."
+            wait.until(EC.element_to_be_clickable((By.ID, "exit_button"))).click()
+            wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
+            BOT_STATE["status"] = "At Main Menu"
+            BOT_STATE["current_ship_id"] = "N/A"
+            log_event("SUCCESS: Left ship, now at main menu."); print("✅ [LEAVE] Successfully left ship.")
+        except TimeoutException:
+            log_event("INFO: Leave command ignored, already at main menu."); print("[LEAVE] Already at main menu.")
+        except Exception as e:
+            BOT_STATE["status"] = "Error during leave"; log_event(f"ERROR: Leave failed: {e}"); print(f"❌ [LEAVE] Leave failed: {e}")
+            if driver: driver.quit()
+
+# --- INITIAL STARTUP AND MAIN LOOP ---
+def start_bot():
     global driver
     BOT_STATE["status"] = "Launching Browser..."; log_event(f"Starting into waiting room: {DEFAULT_SHIP_INVITE_LINK}")
     driver = setup_driver()
@@ -158,45 +174,50 @@ def start_bot(use_key_login):
         driver.get(DEFAULT_SHIP_INVITE_LINK); print(f"Navigating to: {DEFAULT_SHIP_INVITE_LINK}")
         wait = WebDriverWait(driver, 25)
         try:
-            btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".modal-container .btn-green"))); driver.execute_script("arguments[0].click();", btn);
-            if ANONYMOUS_LOGIN_KEY and use_key_login:
+            # Click "Accept" on the first modal
+            wait.until(EC.element_to_be_clickable((By.XPATH, "//div[contains(@class, 'modal-container')]//button[contains(., 'Accept')]"))).click()
+            print("[SETUP] Clicked 'Accept' on notice.")
+            
+            # Decide login path
+            if ANONYMOUS_LOGIN_KEY:
                 print("[SETUP] Attempting to log in with anonymous key...")
-                link = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(., 'Restore old anonymous key')]"))); driver.execute_script("arguments[0].click();", link);
+                wait.until(EC.element_to_be_clickable((By.PARTIAL_LINK_TEXT, "Restore old anonymous key"))).click()
                 wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.modal-window input[maxlength="24"]'))).send_keys(ANONYMOUS_LOGIN_KEY)
-                submit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[.//h2[text()='Restore Account Key']]//button[contains(@class, 'btn-green')]")));
-                driver.execute_script("arguments[0].click();", submit_btn);
+                wait.until(EC.element_to_be_clickable((By.XPATH, "//div[.//h2[text()='Restore Account Key']]//button"))).click()
                 wait.until(EC.invisibility_of_element_located((By.XPATH, "//div[.//h2[text()='Restore Account Key']]")))
                 if driver.find_elements(By.XPATH, "//h2[text()='Login Failed']"): raise InvalidKeyError("Login Failed! Key may be invalid.")
             else:
                 print("[SETUP] No login key found. Playing as a new guest.")
-                play_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Play Anonymously')]"))); driver.execute_script("arguments[0].click();", play_btn);
-        except TimeoutException: print("[SETUP] Login prompts did not appear, assuming already in-game.")
+                wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Play Anonymously')]"))).click()
+        except TimeoutException: print("[SETUP] Login prompts did not appear as expected, assuming already in-game.")
         except Exception as e: log_event(f"Login failed critically: {e}"); raise e
         
-        WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")));
+        WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
         found_id = driver.execute_script("for(const p of document.querySelectorAll('#chat-content p')){const t=p.textContent||'';if(t.includes(\"Joined ship '\")){const m=t.match(/{[A-Z\\d]+}/);if(m&&m[0])return m[0]}}return null;")
         if not found_id: raise RuntimeError("Failed to find Ship ID after joining.")
 
         BOT_STATE["current_ship_id"] = found_id; log_event(f"Confirmed in waiting room: {found_id}"); print(f"✅ Successfully joined waiting room: {found_id}")
 
-    BOT_STATE["status"] = "Waiting for join command..."; queue_reply("Joiner bot is waiting.");
+    BOT_STATE["status"] = "Waiting for command..."; queue_reply("Interactive bot is waiting.");
     while True:
         reset_inactivity_timer()
         time.sleep(60)
 
+# --- MAIN EXECUTION BLOCK ---
 def run_bot_lifecycle():
     print("[SYSTEM] Delaying bot startup for 20 seconds...")
     time.sleep(20); print("[SYSTEM] Startup delay complete. Initializing bot lifecycle.")
-    use_key_login = True; restart_count = 0; last_restart_time = time.time()
+    restart_count = 0; last_restart_time = time.time()
     while True:
         current_time = time.time()
         if current_time - last_restart_time < 3600: restart_count += 1
         else: restart_count = 1
         if restart_count > 10: print("CRITICAL: Bot is thrashing. Pausing for 5 minutes."); log_event("CRITICAL: Thrashing detected. Pausing."); time.sleep(300)
         
-        try: start_bot(use_key_login)
-        except InvalidKeyError as e:
-            err_msg = f"CRITICAL: {e}. Switching to Guest Mode."; log_event(err_msg); print(f"[SYSTEM] {err_msg}"); use_key_login = False
+        try: start_bot()
+        except InvalidKeyError:
+            log_event("FATAL: Invalid login key. The script will not function."); print("FATAL: Invalid key provided. Halting.")
+            break # Stop the loop entirely if the key is bad
         except Exception as e:
             BOT_STATE["status"] = "Crashed! Restarting..."; log_event(f"CRITICAL ERROR: {e}"); print(f"[SYSTEM] Full restart. Reason: {e}");
         finally:
