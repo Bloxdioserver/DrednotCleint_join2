@@ -1,5 +1,5 @@
-# drednot_bot.py (Version 5.2 - Interactive Joiner with Proven ID-Finding Logic)
-# Re-implements the robust scan + poll logic for finding the ship ID to fix the restart loop.
+# drednot_bot.py (Version 5.2.1 - Interactive Joiner with Indentation Fix)
+# Corrects the IndentationError in the exception handling blocks.
 
 import os
 import re
@@ -35,12 +35,9 @@ driver_lock = Lock()
 inactivity_timer = None
 driver = None
 BOT_STATE = {"status": "Initializing...", "current_ship_id": "N/A", "last_command": "None yet.", "event_log": deque(maxlen=20)}
-
-# THIS IS THE LOGIC FROM THE SCRIPT THAT WORKED
 MUTATION_OBSERVER_SCRIPT = """
     console.log('[Bot-JS] Initializing join event observer...');
-    window.py_bot_events = [];
-    const targetNode = document.getElementById('chat-content');
+    window.py_bot_events = []; const targetNode = document.getElementById('chat-content');
     if (!targetNode) { return; }
     const callback = (mutationList) => {
         for (const mutation of mutationList) {
@@ -57,7 +54,6 @@ MUTATION_OBSERVER_SCRIPT = """
     };
     new MutationObserver(callback).observe(targetNode, { childList: true });
 """
-
 class InvalidKeyError(Exception): pass
 def log_event(message):
     timestamp = datetime.now().strftime('%H:%M:%S')
@@ -138,8 +134,11 @@ def perform_in_session_join(target_ship_id):
             BOT_STATE["current_ship_id"] = new_ship_id; BOT_STATE["status"] = f"In Ship: {new_ship_id}"
             log_event(f"SUCCESS: Joined {new_ship_id}."); print(f"✅ [JOIN] Successfully joined {new_ship_id}!")
             queue_reply(f"Bot has arrived.")
-        except Exception as e: BOT_STATE["status"] = "Error during join"; log_event(f"ERROR: Join failed: {e}"); print(f"❌ [JOIN] Join failed: {e}");
-            if driver: driver.quit()
+        except Exception as e: 
+            BOT_STATE["status"] = "Error during join"; log_event(f"ERROR: Join failed: {e}"); print(f"❌ [JOIN] Join failed: {e}");
+            # --- FIX: Indentation corrected ---
+            if driver: 
+                driver.quit()
 def perform_leave_ship():
     with driver_lock:
         if not driver: log_event("ERROR: Leave request received, but browser is offline."); return
@@ -149,10 +148,11 @@ def perform_leave_ship():
             wait = WebDriverWait(driver, 5); wait.until(EC.element_to_be_clickable((By.ID, "exit_button"))).click(); wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
             BOT_STATE["status"] = "At Main Menu"; BOT_STATE["current_ship_id"] = "N/A"; log_event("SUCCESS: Left ship."); print("✅ [LEAVE] Successfully left ship.")
         except TimeoutException: log_event("INFO: Leave ignored, already at main menu."); print("[LEAVE] Already at main menu.")
-        except Exception as e: BOT_STATE["status"] = "Error during leave"; log_event(f"ERROR: Leave failed: {e}"); print(f"❌ [LEAVE] Leave failed: {e}");
-            if driver: driver.quit()
-
-# --- INITIAL STARTUP AND MAIN LOOP (MODIFIED WITH PROVEN LOGIC) ---
+        except Exception as e: 
+            BOT_STATE["status"] = "Error during leave"; log_event(f"ERROR: Leave failed: {e}"); print(f"❌ [LEAVE] Leave failed: {e}");
+            # --- FIX: Indentation corrected ---
+            if driver: 
+                driver.quit()
 def start_bot():
     global driver
     BOT_STATE["status"] = "Launching Browser..."; log_event(f"Starting into waiting room: {DEFAULT_SHIP_INVITE_LINK}")
@@ -176,39 +176,23 @@ def start_bot():
         
         WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
         driver.execute_script(MUTATION_OBSERVER_SCRIPT); log_event("In-game, observer active.")
-        
-        # --- FIX: Re-implementing the robust Scan + Poll logic ---
-        ship_id_found = False
-        print("[SETUP] Proactively scanning existing chat for Ship ID...")
+        ship_id_found = False; print("[SETUP] Proactively scanning existing chat for Ship ID...")
         PROACTIVE_SCAN_SCRIPT = "for(const p of document.querySelectorAll('#chat-content p')){const t=p.textContent||'';if(t.includes(\"Joined ship '\")){const m=t.match(/{[A-Z\\d]+}/);if(m&&m[0])return m[0]}}return null;"
         found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
-
         if found_id:
-            ship_id_found = True
-            log_event(f"Confirmed Ship ID via scan: {found_id}")
-            print(f"✅ Confirmed Ship ID via scan: {found_id}")
+            ship_id_found = True; log_event(f"Confirmed Ship ID via scan: {found_id}"); print(f"✅ Confirmed Ship ID via scan: {found_id}")
         else:
-            print("[SETUP] No existing ID found. Waiting for live event...")
-            log_event("Waiting for live 'join' event...")
+            print("[SETUP] No existing ID found. Waiting for live event..."); log_event("Waiting for live 'join' event...")
             start_time = time.time()
-            while time.time() - start_time < 20: # Wait up to 20 seconds for the message
+            while time.time() - start_time < 20:
                 new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
                 for event in new_events:
                     if event['type'] == 'ship_joined':
-                        found_id = event['id']
-                        ship_id_found = True
-                        log_event(f"Confirmed Ship ID via event: {found_id}")
-                        print(f"✅ Confirmed Ship ID via event: {found_id}")
-                        break
+                        found_id = event['id']; ship_id_found = True; log_event(f"Confirmed Ship ID via event: {found_id}"); print(f"✅ Confirmed Ship ID via event: {found_id}"); break
                 if ship_id_found: break
                 time.sleep(0.5)
-
-        if not ship_id_found:
-            raise RuntimeError("Failed to get Ship ID via scan or live event.")
-        # --- End of FIX ---
-
+        if not ship_id_found: raise RuntimeError("Failed to get Ship ID via scan or live event.")
         BOT_STATE["current_ship_id"] = found_id
-
     BOT_STATE["status"] = "Waiting for command..."; queue_reply("Bot is waiting for commands.");
     while True:
         reset_inactivity_timer()
@@ -222,8 +206,6 @@ def start_bot():
                             BOT_STATE["current_ship_id"] = event['id']; log_event(f"Switched to new ship: {event['id']}")
         except WebDriverException: break
         time.sleep(30)
-
-# --- MAIN EXECUTION BLOCK ---
 def run_bot_lifecycle():
     print("[SYSTEM] Delaying bot startup for 20 seconds...")
     time.sleep(20); print("[SYSTEM] Startup delay complete. Initializing bot lifecycle.")
@@ -233,7 +215,6 @@ def run_bot_lifecycle():
         if current_time - last_restart_time < 3600: restart_count += 1
         else: restart_count = 1
         if restart_count > 10: print("CRITICAL: Bot is thrashing. Pausing for 5 minutes."); log_event("CRITICAL: Thrashing detected. Pausing."); time.sleep(300)
-        
         try: start_bot()
         except InvalidKeyError:
             log_event("FATAL: Invalid login key. Halting."); print("FATAL: Invalid key. Halting."); break
@@ -247,7 +228,6 @@ def run_bot_lifecycle():
                 except: pass
             driver = None
             time.sleep(5)
-
 if __name__ == "__main__":
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=message_processor_thread, daemon=True).start()
