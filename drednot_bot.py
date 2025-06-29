@@ -1,5 +1,7 @@
-# joiner_bot.py (Version 2.0 - Multi-Bot Pool)
+# joiner_bot.py (Version 2.1 - Keyless & Multi-Profile)
 # A standalone bot that manages a pool of instances and dispatches them on request.
+# - Removed API key requirement for join requests.
+# - Each bot uses a separate, persistent guest profile for a unique identity.
 
 import os
 import time
@@ -19,8 +21,8 @@ from selenium.common.exceptions import WebDriverException, TimeoutException, NoS
 # --- CONFIGURATION ---
 # The number of bot instances to run. Can be set as an environment variable.
 NUM_BOTS = int(os.environ.get("NUM_BOTS", 3))
-API_KEY = 'drednot123'
-ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT'
+# Base directory where bot profiles will be stored.
+PROFILE_BASE_DIR = "bot_profiles"
 
 # --- GLOBAL STATE & LOCKS ---
 
@@ -44,8 +46,11 @@ def find_chromium_executable():
     if path: return path
     raise FileNotFoundError("Could not find 'chromium' or 'chromium-browser' executable. Please install it.")
 
-def setup_driver():
-    """Configures and launches a single headless Chrome browser."""
+def setup_driver(profile_path: str):
+    """
+    Configures and launches a single headless Chrome browser using a specific profile path.
+    This ensures each bot has its own separate session data (cookies, local storage, etc.).
+    """
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -54,6 +59,9 @@ def setup_driver():
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--disable-images")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    # *** CHANGE: Use a dedicated user data directory for profile separation ***
+    chrome_options.add_argument(f"--user-data-dir={profile_path}")
+
     try:
         chrome_options.binary_location = find_chromium_executable()
     except FileNotFoundError as e:
@@ -61,27 +69,24 @@ def setup_driver():
         exit(1)
     return webdriver.Chrome(options=chrome_options)
 
-def start_single_bot(bot: BotInstance):
-    """Initializes one bot instance, logs it in, and leaves it at the main menu."""
-    print(f"[BOT-{bot.id}] Starting instance...")
+def start_single_bot(bot: BotInstance, profile_path: str):
+    """Initializes one bot instance as a fresh guest, and leaves it at the main menu."""
+    print(f"[BOT-{bot.id}] Starting instance with profile: {profile_path}")
     try:
-        bot.driver = setup_driver()
+        # *** CHANGE: Pass the unique profile path to the driver setup ***
+        bot.driver = setup_driver(profile_path)
         bot.status = "Navigating"
         bot.driver.get("https://drednot.io/")
         wait = WebDriverWait(bot.driver, 20)
-        
+
+        # Accept initial terms if they appear
         btn_accept = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".modal-container .btn-green")))
         bot.driver.execute_script("arguments[0].click();", btn_accept)
-        
-        if ANONYMOUS_LOGIN_KEY:
-            link = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(., 'Restore old anonymous key')]")))
-            bot.driver.execute_script("arguments[0].click();", link)
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.modal-window input[maxlength="24"]'))).send_keys(ANONYMOUS_LOGIN_KEY)
-            submit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[.//h2[text()='Restore Account Key']]//button[contains(@class, 'btn-green')]")))
-            bot.driver.execute_script("arguments[0].click();", submit_btn)
-        else:
-            play_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Play Anonymously')]")))
-            bot.driver.execute_script("arguments[0].click();", play_btn)
+
+        # *** CHANGE: Simplified login logic to always play as an anonymous guest ***
+        play_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Play Anonymously')]")))
+        bot.driver.execute_script("arguments[0].click();", play_btn)
+        # --- End of simplified login logic ---
 
         wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
         bot.status = "Idle - Awaiting Join Command"
@@ -94,16 +99,26 @@ def start_single_bot(bot: BotInstance):
             bot.driver.quit()
 
 def initialize_bot_pool():
-    """Creates and starts all bot instances defined by NUM_BOTS."""
+    """Creates and starts all bot instances, each with its own profile directory."""
     print(f"[SYSTEM] Initializing a pool of {NUM_BOTS} bot(s)...")
+    
+    # *** CHANGE: Create the base directory for all profiles if it doesn't exist ***
+    os.makedirs(PROFILE_BASE_DIR, exist_ok=True)
+    
     for i in range(NUM_BOTS):
         bot = BotInstance(bot_id=i)
         bot_pool.append(bot)
+        
+        # *** CHANGE: Define a unique profile path for this specific bot ***
+        profile_path = os.path.join(PROFILE_BASE_DIR, f"bot_{bot.id}_profile")
+        
         # We start them sequentially to avoid overwhelming the system on startup
-        start_single_bot(bot)
+        # Pass the unique profile path to the startup function
+        start_single_bot(bot, profile_path)
+        
     print("[SYSTEM] All bot instances initialized.")
 
-# --- CORE JOIN LOGIC ---
+# --- CORE JOIN LOGIC (Unchanged) ---
 
 def send_chat(bot: BotInstance, message: str):
     if not bot.driver: return
@@ -113,7 +128,7 @@ def send_chat(bot: BotInstance, message: str):
             const chatInp = document.getElementById('chat-input'); const chatBtn = document.getElementById('chat-send');
             if (chatBox && chatBox.classList.contains('closed')) { chatBtn.click(); }
             if (chatInp) { chatInp.value = msg; }
-            chatBtn.click();
+            if (chatBtn) { chatBtn.click(); }
         """, message)
     except WebDriverException:
         print(f"[BOT-{bot.id}] [WARN] Could not send chat message. Browser might have closed.")
@@ -132,15 +147,13 @@ def perform_join_ship(bot: BotInstance, new_ship_id: str):
     print(f"[BOT-{bot.id}] [JOIN] Attempting to join new ship: {new_ship_id}")
 
     try:
-        # Step 1: Intelligently return to the main menu
         try:
             exit_button = WebDriverWait(bot.driver, 3).until(EC.element_to_be_clickable((By.ID, "exit_button")))
             bot.driver.execute_script("arguments[0].click();", exit_button)
             WebDriverWait(bot.driver, 15).until(EC.presence_of_element_located((By.ID, 'shipyard')))
         except TimeoutException:
-            pass # Already at the main menu
+            pass
 
-        # Step 2: Find the ship and click it
         wait = WebDriverWait(bot.driver, 15)
         wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
         
@@ -157,7 +170,6 @@ def perform_join_ship(bot: BotInstance, new_ship_id: str):
         if not clicked:
             raise RuntimeError(f"Could not find ship {new_ship_id} in list.")
 
-        # Step 3: Confirm join and update state
         wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
         
         print(f"[BOT-{bot.id}] [SUCCESS] Joined ship {new_ship_id}!")
@@ -181,7 +193,6 @@ flask_app = Flask('')
 
 @flask_app.route('/')
 def health_check():
-    """Provides a detailed status page for the entire bot pool."""
     html = """
     <html><head><title>Bot Pool Status</title><meta http-equiv="refresh" content="5"></head>
     <body style="font-family: sans-serif; background-color: #1e1e1e; color: #d4d4d4;">
@@ -208,9 +219,12 @@ def health_check():
 
 @flask_app.route('/join-request', methods=['POST'])
 def handle_join_request():
-    """Finds an available bot from the pool and dispatches it."""
-    if request.headers.get('x-api-key') != API_KEY:
-        return Response('{"error": "Invalid API key"}', status=401, mimetype='application/json')
+    """Finds an available bot from the pool and dispatches it. No API key required."""
+    
+    # *** CHANGE: The API key check has been removed. ***
+    # if request.headers.get('x-api-key') != API_KEY:
+    #     return Response('{"error": "Invalid API key"}', status=401, mimetype='application/json')
+    
     data = request.get_json()
     if not data or 'shipId' not in data:
         return Response('{"error": "Missing shipId"}', status=400, mimetype='application/json')
@@ -220,13 +234,11 @@ def handle_join_request():
     
     chosen_bot = None
     with bot_pool_lock:
-        # First, try to find a completely idle bot
         for bot in bot_pool:
             if bot.status == "Idle - Awaiting Join Command":
                 chosen_bot = bot
                 break
         
-        # If no idle bots, grab one that's already in another ship (but not errored or busy)
         if not chosen_bot:
             for bot in bot_pool:
                 if "In Ship" in bot.status:
