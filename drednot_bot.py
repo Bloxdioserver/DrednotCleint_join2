@@ -20,7 +20,7 @@ from selenium.common.exceptions import WebDriverException, TimeoutException, NoS
 
 # --- CONFIGURATION ---
 # The number of bot instances to run. Can be set as an environment variable.
-NUM_BOTS = int(os.environ.get("NUM_BOTS", 3))
+NUM_BOTS = int(os.environ.get("NUM_BOTS", 1))
 # Base directory where bot profiles will be stored.
 PROFILE_BASE_DIR = "bot_profiles"
 
