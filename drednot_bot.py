@@ -23,8 +23,8 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # --- CONFIGURATION ---
 API_KEY = 'drednot123' # For on-demand join requests
-ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT' # Bot's primary login key
-DEFAULT_SHIP_INVITE_LINK = '' # The "waiting room" ship
+ANONYMOUS_LOGIN_KEY = '' # Bot's primary login key
+DEFAULT_SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc' # The "waiting room" ship
 
 MESSAGE_DELAY_SECONDS = 1.2
 ZWSP = '\u200B'
