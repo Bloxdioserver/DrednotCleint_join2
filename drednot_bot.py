@@ -171,13 +171,19 @@ def log_event(message):
 def setup_driver():
     logging.info("Launching headless browser for Docker environment...")
     chrome_options = Options()
+    
+    # This line tells Selenium where the BROWSER is. This is correct.
     chrome_options.binary_location = "/usr/bin/chromium"
+    
+    # These arguments are also correct.
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    service = Service(executable_path="/usr/bin/chromedriver")
-    return webdriver.Chrome(service=service, options=chrome_options)
 
+    # [FIX] REMOVED the Service object.
+    # By passing only the options, we let Selenium's manager automatically
+    # find the chromedriver that our Dockerfile installed. This is the fix.
+    return webdriver.Chrome(options=chrome_options)
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
