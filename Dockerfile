@@ -24,4 +24,4 @@ COPY . .
 ENV PYTHONUNBUFFERED=1
 
 # Command to run your application
-CMD ["python", "bot.py"]
+CMD ["python", "drednot_bot.py"]
