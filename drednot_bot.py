@@ -1,8 +1,7 @@
 # bot.py
-# ULTRA-PERFORMANCE VERSION
-# This bot is stripped down to the absolute minimum for performance.
-# It disables all non-essential browser features, blocks content downloads,
-# and neutralizes the game's rendering and audio engines.
+# FINAL STABILIZED PERFORMANCE VERSION
+# This version removes the unstable '--single-process' flag and adds a small delay
+# to ensure the browser is fully initialized before loading the game, preventing startup crashes.
 
 import os
 import logging
@@ -35,22 +34,12 @@ if not SHIP_INVITE_LINK:
 # --- JAVASCRIPT PAYLOADS ---
 PERFORMANCE_BOOSTER_SCRIPT = """
 console.log('[PerfBooster] Applying aggressive optimizations...');
-// Stop the game's main rendering loop. The #1 CPU saver.
-window.requestAnimationFrame = () => {};
-window.cancelAnimationFrame = () => {};
-
-// Nuke the Web Audio API. The #1 secondary CPU/RAM saver.
-window.AudioContext = undefined;
-window.webkitAudioContext = undefined;
-
-// Attempt to block image processing functions.
+window.requestAnimationFrame = () => {}; window.cancelAnimationFrame = () => {};
+window.AudioContext = undefined; window.webkitAudioContext = undefined;
 window.createImageBitmap = () => Promise.reject(new Error('Disabled for performance'));
-
-// Hide the canvas and other heavy elements just in case.
 const style = document.createElement('style');
 style.innerHTML = `canvas, .game-background { display: none !important; }`;
 document.head.appendChild(style);
-
 console.log('[PerfBooster] Game rendering, audio, and heavy elements neutralized.');
 """
 
@@ -138,28 +127,25 @@ def log_event(message):
 
 # --- BROWSER & FLASK SETUP ---
 def setup_driver():
-    logging.info("Launching headless browser with MAXIMUM performance optimizations...")
+    logging.info("Launching headless browser with STABILITY-focused performance options...")
     chrome_options = Options()
     chrome_options.binary_location = "/usr/bin/chromium"
 
-    # --- AGGRESSIVE PERFORMANCE OPTIONS ---
+    # --- STABLE PERFORMANCE OPTIONS ---
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-dev-shm-usage") # Still critical for Docker
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-background-networking")
     chrome_options.add_argument("--disable-sync")
     chrome_options.add_argument("--disable-translate")
-    chrome_options.add_argument("--disable-default-apps")
-    chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument("--log-level=3") # Only log fatal errors.
-    chrome_options.add_argument("--single-process") # Risky, but can reduce RAM.
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false") # A more modern way to disable images.
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    # REMOVED: --single-process (known to cause instability)
+    # REMOVED: --disable-software-rasterizer (can conflict with --disable-gpu)
 
-    # --- BLOCK CONTENT (IMAGES, CSS, FONTS) ---
-    # This tells Chrome not to download these resources, saving RAM and network.
     prefs = {
         "profile.managed_default_content_settings.images": 2,
         "profile.managed_default_content_settings.stylesheets": 2,
@@ -196,6 +182,10 @@ def start_bot(use_key_login):
     BOT_STATE["status"] = "Launching Browser..."
     log_event("Starting new Selenium session...")
     driver = setup_driver()
+
+    # ADDED: A small delay to allow the browser process to stabilize before use.
+    log_event("Allowing browser process to stabilize for 3 seconds...")
+    time.sleep(3)
 
     log_event(f"Navigating to invite link...")
     driver.get(SHIP_INVITE_LINK)
@@ -252,8 +242,7 @@ def main():
             log_event("Bot is running. Monitoring game state.")
             BOT_STATE["status"] = "Running (Client active)"
             failure_count = 0
-            
-            # Health check with longer interval to reduce command overhead
+
             while True:
                 time.sleep(90)
                 driver.find_element(By.ID, "chat-input")
@@ -262,8 +251,8 @@ def main():
             failure_count += 1
             BOT_STATE["status"] = f"Crashed! Restarting... (Failure {failure_count}/{MAX_FAILURES})"
             log_event(f"CRITICAL ERROR (Failure #{failure_count}): {e}")
-            traceback.print_exc() # Still print traceback to console for live debugging
-            
+            traceback.print_exc()
+
             if "invalid" in str(e).lower():
                 log_event("Login key may be invalid. Will try as Guest on next restart.")
                 use_key_login = False
@@ -271,7 +260,7 @@ def main():
             if driver:
                 try: driver.quit()
                 except Exception: pass
-            
+
             if failure_count < MAX_FAILURES:
                 time.sleep(10)
             else:
