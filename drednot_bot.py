@@ -1,7 +1,7 @@
 # bot.py
-# FINAL STABILIZED PERFORMANCE VERSION
-# This version removes the unstable '--single-process' flag and adds a small delay
-# to ensure the browser is fully initialized before loading the game, preventing startup crashes.
+# FINAL STABILIZED VERSION (with Pre-emptive Injection)
+# This version loads a blank page first, injects performance scripts, and THEN
+# navigates to the game. This is the most reliable method for resource-constrained environments.
 
 import os
 import logging
@@ -131,21 +131,15 @@ def setup_driver():
     chrome_options = Options()
     chrome_options.binary_location = "/usr/bin/chromium"
 
-    # --- STABLE PERFORMANCE OPTIONS ---
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage") # Still critical for Docker
+    chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-background-networking")
-    chrome_options.add_argument("--disable-sync")
-    chrome_options.add_argument("--disable-translate")
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--log-level=3")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    # REMOVED: --single-process (known to cause instability)
-    # REMOVED: --disable-software-rasterizer (can conflict with --disable-gpu)
-
+    
     prefs = {
         "profile.managed_default_content_settings.images": 2,
         "profile.managed_default_content_settings.stylesheets": 2,
@@ -183,18 +177,20 @@ def start_bot(use_key_login):
     log_event("Starting new Selenium session...")
     driver = setup_driver()
 
-    # ADDED: A small delay to allow the browser process to stabilize before use.
-    log_event("Allowing browser process to stabilize for 3 seconds...")
-    time.sleep(3)
+    # --- PRE-EMPTIVE INJECTION TECHNIQUE ---
+    # 1. Navigate to a harmless blank page first.
+    log_event("Loading blank page for pre-emptive script injection...")
+    driver.get("about:blank")
 
+    # 2. Inject the performance-boosting script into the blank page.
+    log_event("Injecting performance booster before navigating to game...")
+    driver.execute_script(PERFORMANCE_BOOSTER_SCRIPT)
+    log_event("Performance script is now active and waiting.")
+
+    # 3. NOW, navigate to the actual game. The script is already active and will
+    #    neuter the game's heavy components the moment they try to load.
     log_event(f"Navigating to invite link...")
     driver.get(SHIP_INVITE_LINK)
-
-    try:
-        log_event("Injecting performance booster script...")
-        driver.execute_script(PERFORMANCE_BOOSTER_SCRIPT)
-    except Exception as e:
-        log_event(f"Warning: Could not inject performance booster. {e}")
 
     try:
         wait = WebDriverWait(driver, 20)
