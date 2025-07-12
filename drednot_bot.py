@@ -1,8 +1,7 @@
-# FUSED DEFINITIVE VERSION - REJOIN ENHANCED
+# FUSED DEFINITIVE VERSION - REJOIN & ID CAPTURE ENHANCED
 # This script combines the "Kingdom" bot's purpose with the "EconomyBot's"
-# superior auto-rejoin and monitoring logic. It uses a proactive
-# inactivity timer and Ship ID tracking for maximum resilience.
-# VERSION 2: Fixes an IndentationError during startup.
+# superior auto-rejoin logic and adds a more robust two-step Ship ID capture.
+# VERSION 3.1: Final, consolidated, and error-corrected script.
 
 import os
 import logging
@@ -25,9 +24,9 @@ SHIP_INVITE_LINK = "https://drednot.io/invite/Wu5aTltskmcqkFP8rI0LW3Ws"
 ANONYMOUS_LOGIN_KEY = "_M85tFxFxIRDax_nh-HYm1gT"
 MAX_FAILURES = 5
 
-# --- NEW: Rejoin & Monitoring Configuration ---
-INACTIVITY_TIMEOUT_SECONDS = 3 * 60
-MAIN_LOOP_POLLING_INTERVAL_SECONDS = 1.0
+# Rejoin & Monitoring Configuration
+INACTIVITY_TIMEOUT_SECONDS = 3 * 60 # 3 minutes
+MAIN_LOOP_POLLING_INTERVAL_SECONDS = 1.0 # Check for activity every second
 
 # --- LOGGING & VALIDATION ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -37,8 +36,8 @@ if not SHIP_INVITE_LINK:
     exit(1)
 
 # --- JAVASCRIPT PAYLOADS ---
-# (JavaScript sections are unchanged from the previous version)
 
+# SCRIPT 1: Injected into a blank page to neuter the browser BEFORE the game loads.
 PERFORMANCE_BOOSTER_SCRIPT = """
 console.log('[PerfBooster] Applying aggressive optimizations...');
 window.requestAnimationFrame = () => {}; window.cancelAnimationFrame = () => {};
@@ -50,6 +49,7 @@ document.head.appendChild(style);
 console.log('[PerfBooster] Game rendering, audio, and heavy elements neutralized.');
 """
 
+# SCRIPT 2: The self-sufficient client with built-in monitoring logic.
 CLIENT_SIDE_SCRIPT = """
 (function() {
     'use strict';
@@ -129,7 +129,7 @@ CLIENT_SIDE_SCRIPT = """
 })();
 """
 
-# --- GLOBAL STATE & THREADING ---
+# --- GLOBAL STATE & THREADING PRIMITIVES ---
 driver = None
 inactivity_timer = None
 BOT_STATE = {"status": "Initializing...", "start_time": datetime.now(), "current_ship_id": "N/A", "event_log": deque(maxlen=20)}
@@ -140,12 +140,12 @@ def log_event(message):
     BOT_STATE["event_log"].appendleft(full_message)
     logging.info(f"EVENT: {message}")
 
-# --- BROWSER & FLASK (Unchanged) ---
+# --- BROWSER & FLASK SETUP ---
 def setup_driver():
     logging.info("Launching headless browser with STABILITY-focused performance options...")
     chrome_options = Options()
-    # Note: For some environments like Docker, you might need to specify binary_location.
-    # chrome_options.binary_location = "/usr/bin/chromium" 
+    # For some Docker environments, you might need to explicitly set the binary location:
+    # chrome_options.binary_location = "/usr/bin/chromium"
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -170,8 +170,9 @@ def run_flask():
     logging.info(f"Health check server listening on http://0.0.0.0:{port}")
     flask_app.run(host='0.0.0.0', port=port)
 
-# --- REJOIN LOGIC (Unchanged) ---
+# --- REJOIN LOGIC ---
 def reset_inactivity_timer():
+    """Cancels the old timer and starts a new one."""
     global inactivity_timer
     if inactivity_timer:
         inactivity_timer.cancel()
@@ -179,6 +180,7 @@ def reset_inactivity_timer():
     inactivity_timer.start()
 
 def attempt_soft_rejoin():
+    """Proactively tries to rejoin the ship without a full browser restart."""
     log_event("Game inactivity detected. Attempting proactive soft rejoin.")
     BOT_STATE["status"] = "Attempting Soft Rejoin..."
     global driver
@@ -236,13 +238,11 @@ def start_bot(use_key_login):
 
     log_event("Loading blank page for pre-emptive script injection...")
     driver.get("about:blank")
-    log_event("Injecting performance booster before navigating to game...")
     driver.execute_script(PERFORMANCE_BOOSTER_SCRIPT)
 
     log_event(f"Navigating to invite link...")
     driver.get(SHIP_INVITE_LINK)
 
-    # --- THIS BLOCK IS NOW CORRECTLY FILLED ---
     try:
         wait = WebDriverWait(driver, 20)
         btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".modal-container .btn-green")))
@@ -268,9 +268,7 @@ def start_bot(use_key_login):
     except Exception as e:
         log_event(f"Critical error during login: {e}")
         raise
-    # --- END OF FIX ---
 
-    log_event("Waiting for page to load before injecting client...")
     WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
     log_event("Game loaded.")
 
@@ -278,28 +276,55 @@ def start_bot(use_key_login):
     driver.execute_script(CLIENT_SIDE_SCRIPT)
     log_event("JavaScript client injected successfully.")
 
-    log_event("Attempting to get Ship ID...")
-    start_time = time.time()
+    # Two-pronged Ship ID capture
     ship_id_found = False
-    while time.time() - start_time < 20:
-        try:
-            new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
-            for event in new_events:
-                if event.get('type') == 'ship_joined':
-                    BOT_STATE["current_ship_id"] = event['id']
-                    ship_id_found = True
-                    log_event(f"✅ Confirmed Ship ID: {BOT_STATE['current_ship_id']}")
-                    break
-            if ship_id_found:
+    
+    # 1. Proactive Scan
+    log_event("Proactively scanning chat history for Ship ID...")
+    PROACTIVE_SCAN_SCRIPT = """
+        const chatContent = document.getElementById('chat-content');
+        if (!chatContent) { return null; }
+        const paragraphs = chatContent.querySelectorAll('p');
+        for (let i = paragraphs.length - 1; i >= 0; i--) {
+            const pText = paragraphs[i].textContent || "";
+            if (pText.includes("Joined ship '")) {
+                const match = pText.match(/{[A-Z\\d]+}/);
+                if (match && match[0]) { return match[0]; }
+            }
+        }
+        return null;
+    """
+    try:
+        found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
+        if found_id:
+            BOT_STATE["current_ship_id"] = found_id
+            ship_id_found = True
+            log_event(f"✅ Confirmed Ship ID via proactive scan: {found_id}")
+    except WebDriverException as e:
+        log_event(f"Could not run proactive scan: {e.msg}")
+
+    # 2. Live Monitoring (Fallback)
+    if not ship_id_found:
+        log_event("No ID in history. Waiting for live 'ship_joined' event...")
+        start_time = time.time()
+        while time.time() - start_time < 15:
+            try:
+                new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
+                for event in new_events:
+                    if event.get('type') == 'ship_joined':
+                        BOT_STATE["current_ship_id"] = event['id']
+                        ship_id_found = True
+                        log_event(f"✅ Confirmed Ship ID via live event: {BOT_STATE['current_ship_id']}")
+                        break
+                if ship_id_found: break
+            except WebDriverException:
                 break
-        except WebDriverException:
-            break
-        time.sleep(1)
+            time.sleep(0.5)
     
     if not ship_id_found:
-        raise RuntimeError("Failed to get Ship ID after joining. Cannot guarantee rejoin.")
+        raise RuntimeError("Failed to get Ship ID via scan or live event. Cannot guarantee rejoin.")
 
-# --- MAIN EXECUTION (Unchanged) ---
+# --- MAIN EXECUTION & LIFECYCLE MANAGEMENT ---
 def main():
     threading.Thread(target=run_flask, daemon=True).start()
     use_key_login = True
