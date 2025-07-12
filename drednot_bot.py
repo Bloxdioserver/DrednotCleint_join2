@@ -1,7 +1,8 @@
 # bot.py
-# FINAL STABILIZED VERSION (with Pre-emptive Injection)
-# This version loads a blank page first, injects performance scripts, and THEN
-# navigates to the game. This is the most reliable method for resource-constrained environments.
+# FINAL DETAILED-LOGGING VERSION
+# This version adds a /log endpoint to the Flask server, allowing the JavaScript
+# client to send detailed, real-time status updates (like commands used)
+# back to the main event log on the status page.
 
 import os
 import logging
@@ -11,7 +12,8 @@ import time
 from datetime import datetime
 from collections import deque
 
-from flask import Flask, Response
+# Note the addition of 'request' to handle incoming log data
+from flask import Flask, Response, request
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -32,34 +34,46 @@ if not SHIP_INVITE_LINK:
     exit(1)
 
 # --- JAVASCRIPT PAYLOADS ---
-PERFORMANCE_BOOSTER_SCRIPT = """
-console.log('[PerfBooster] Applying aggressive optimizations...');
-window.requestAnimationFrame = () => {}; window.cancelAnimationFrame = () => {};
-window.AudioContext = undefined; window.webkitAudioContext = undefined;
-window.createImageBitmap = () => Promise.reject(new Error('Disabled for performance'));
-const style = document.createElement('style');
-style.innerHTML = `canvas, .game-background { display: none !important; }`;
-document.head.appendChild(style);
-console.log('[PerfBooster] Game rendering, audio, and heavy elements neutralized.');
-"""
-
+# This client now contains a function to send logs back to the Python server.
 CLIENT_SIDE_SCRIPT = """
-'use strict';
-if (window.kingdomChatClientLoaded) {
-    console.log('[Kingdom Chat] Client already loaded. Skipping injection.');
-} else {
+(function() {
+    'use strict';
+
+    if (window.kingdomChatClientLoaded) { return; }
     window.kingdomChatClientLoaded = true;
-    console.log('[Kingdom Chat] Initializing client...');
+    console.log('[Kingdom Chat] Initializing client with detailed logging...');
+
     const SERVER_URL = 'https://sortthechat.onrender.com/command';
     const MESSAGE_DELAY = 1200;
     const ZWSP = '\\u200B';
-    const chatBox = document.getElementById("chat");
-    const chatInp = document.getElementById("chat-input");
-    const chatBtn = document.getElementById("chat-send");
     let messageQueue = [];
     let isProcessingQueue = false;
-    function sendChat(mess) { if (chatBox?.classList.contains('closed')) chatBtn?.click(); if (chatInp) chatInp.value = mess; chatBtn?.click(); }
-    function queueReply(message) {
+    let chatObserver = null;
+    let disconnectMonitorInterval = null;
+
+    // NEW: Function to send log messages back to the Python/Flask server
+    function logToServer(message) {
+        fetch('/log', { // Use a relative URL to the log endpoint
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: message }),
+            keepalive: true // Helps ensure the request is sent even if the page is closing
+        }).catch(e => console.error("Failed to send log to server:", e));
+    }
+
+    function sendChat(mess) {
+        const chatBox = document.getElementById("chat");
+        const chatInp = document.getElementById("chat-input");
+        const chatBtn = document.getElementById("chat-send");
+        if (chatBox?.classList.contains('closed')) chatBtn?.click();
+        if (chatInp) chatInp.value = mess;
+        chatBtn?.click();
+    }
+
+    function queueReply(message, sourceCommand) {
+        // Log what we're replying with
+        logToServer(`Queueing reply for command '${sourceCommand}'`);
+
         const MAX_CONTENT_LENGTH = 199;
         const splitLongMessage = (line) => {
             const chunks = []; let remainingText = String(line);
@@ -76,43 +90,101 @@ if (window.kingdomChatClientLoaded) {
         linesToProcess.forEach(line => { splitLongMessage(String(line)).forEach(chunk => { if (chunk) messageQueue.push(ZWSP + chunk); }); });
         if (!isProcessingQueue) processQueue();
     }
+
     function processQueue() {
         if (messageQueue.length === 0) { isProcessingQueue = false; return; }
         isProcessingQueue = true; const nextMessage = messageQueue.shift();
         sendChat(nextMessage); setTimeout(processQueue, MESSAGE_DELAY);
     }
-    function monitorChat() {
-        console.log("[Kingdom Chat] Monitoring for commands...");
-        const observer = new MutationObserver(mutations => {
+
+    function startChatMonitor() {
+        if (chatObserver) return;
+        const chatContent = document.getElementById("chat-content");
+        if (!chatContent) return;
+
+        chatObserver = new MutationObserver(mutations => {
             mutations.forEach(mutation => {
                 mutation.addedNodes.forEach(node => {
                     if (node.nodeType !== 1 || node.tagName !== "P") return;
-                    const pTextContent = node.textContent || ""; if (pTextContent.startsWith(ZWSP)) return;
-                    const bdiMatch = node.innerHTML.match(/<bdi.*?>(.*?)<\\/bdi>/); if (!bdiMatch) return;
-                    const playerName = bdiMatch[1].trim(); const colonIdx = pTextContent.indexOf(':'); if (colonIdx === -1) return;
-                    const commandText = pTextContent.substring(colonIdx + 1).trim(); const parts = commandText.split(' ');
-                    const command = parts[0]; if (!command.startsWith('!')) return;
-                    console.log(`[Kingdom Chat] Sending command '${command}' for player '${playerName}' to server.`);
+                    const pTextContent = node.textContent || "";
+                    if (pTextContent.startsWith(ZWSP)) return;
+                    const bdiMatch = node.innerHTML.match(/<bdi.*?>(.*?)<\\/bdi>/);
+                    if (!bdiMatch) return;
+                    const playerName = bdiMatch[1].trim();
+                    const colonIdx = pTextContent.indexOf(':');
+                    if (colonIdx === -1) return;
+                    const commandText = pTextContent.substring(colonIdx + 1).trim();
+                    const parts = commandText.split(' ');
+                    const command = parts[0];
+                    if (!command.startsWith('!')) return;
+
+                    // Log the received command
+                    logToServer(`Received command '${commandText}' from player '${playerName}'`);
+
                     fetch(SERVER_URL, {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ playerName: playerName, command: command, args: parts.slice(1) })
-                    }).then(response => { if (!response.ok) { throw new Error(`HTTP error! status: ${response.status}`); } return response.json(); })
-                    .then(data => { if (data.replies && Array.isArray(data.replies) && data.replies.length > 0) { queueReply(data.replies); }})
-                    .catch(error => { console.error("[Kingdom Chat] Error sending command to server:", error); queueReply("Error: Could not connect to the game server."); });
+                    }).then(response => response.json())
+                    .then(data => { if (data.replies && data.replies.length > 0) { queueReply(data.replies, command); }})
+                    .catch(error => logToServer(`Error processing command '${command}': ${error}`));
                 });
             });
         });
-        observer.observe(document.getElementById("chat-content"), { childList: true });
+        chatObserver.observe(chatContent, { childList: true });
     }
+    
+    function stopAllMonitors() {
+        if (chatObserver) { chatObserver.disconnect(); chatObserver = null; }
+        if (disconnectMonitorInterval) { clearInterval(disconnectMonitorInterval); disconnectMonitorInterval = null; }
+    }
+
+    function handleRejoin() {
+        logToServer('Disconnect detected! Initiating automatic rejoin sequence.');
+        stopAllMonitors();
+
+        const disconnectPopup = document.querySelector('div#disconnect-popup');
+        const returnButton = disconnectPopup?.querySelector('button.btn-green');
+
+        if (returnButton) {
+            returnButton.click();
+            logToServer('Clicked "Return to Menu". Waiting for menu screen...');
+            const waitForMenu = setInterval(() => {
+                const playButton = document.querySelector("button.btn-large.btn-green[style*='display: block']");
+                if (playButton && playButton.textContent.includes('Play Anonymously')) {
+                    clearInterval(waitForMenu);
+                    logToServer('Main menu detected. Reloading page to rejoin ship...');
+                    location.reload();
+                }
+            }, 1000);
+        } else {
+            logToServer('Could not find disconnect popup. Reloading page as a failsafe...');
+            location.reload();
+        }
+    }
+
+    function startDisconnectMonitor() {
+        if (disconnectMonitorInterval) return;
+        disconnectMonitorInterval = setInterval(() => {
+            const disconnectPopup = document.querySelector('div#disconnect-popup');
+            if (disconnectPopup && disconnectPopup.offsetParent !== null) {
+                handleRejoin();
+            }
+        }, 5000);
+    }
+
     function initialize() {
-        const waitForChat = setInterval(() => {
-            if (document.getElementById("chat-content") && document.getElementById("chat-input")) {
-                clearInterval(waitForChat); monitorChat(); queueReply("👑 Kingdom Chat Client connected.");
+        const waitForGame = setInterval(() => {
+            if (document.getElementById("chat-content")) {
+                clearInterval(waitForGame);
+                logToServer('Game detected! Client is active.');
+                queueReply("👑 Kingdom Chat Client connected. Auto-rejoin is active.");
+                startChatMonitor();
+                startDisconnectMonitor();
             }
         }, 500);
     }
     initialize();
-}
+})();
 """
 
 # --- GLOBAL STATE ---
@@ -130,7 +202,6 @@ def setup_driver():
     logging.info("Launching headless browser with STABILITY-focused performance options...")
     chrome_options = Options()
     chrome_options.binary_location = "/usr/bin/chromium"
-
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -139,31 +210,25 @@ def setup_driver():
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--log-level=3")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    
-    prefs = {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.managed_default_content_settings.stylesheets": 2,
-        "profile.managed_default_content_settings.fonts": 2
-    }
+    prefs = {"profile.managed_default_content_settings.images": 2, "profile.managed_default_content_settings.stylesheets": 2, "profile.managed_default_content_settings.fonts": 2}
     chrome_options.add_experimental_option("prefs", prefs)
-
     return webdriver.Chrome(options=chrome_options)
 
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
     uptime = str(datetime.now() - BOT_STATE['start_time']).split('.')[0]
-    html = f"""
-    <!DOCTYPE html><html lang="en">
-    <head><meta charset="UTF-8"><meta http-equiv="refresh" content="10"><title>Bot Status</title>
-    <style>body{{font-family:monospace;background-color:#1e1e1e;color:#d4d4d4;}}</style></head>
-    <body><h1>Selenium Bridge Bot Status</h1>
-    <p><b>Status:</b> {BOT_STATE['status']}</p>
-    <p><b>Uptime:</b> {uptime}</p>
-    <h2>Event Log</h2><pre>{'<br>'.join(BOT_STATE['event_log'])}</pre>
-    </body></html>
-    """
+    html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10"><title>Bot Status</title><style>body{{font-family:monospace;background-color:#1e1e1e;color:#d4d4d4;}}</style></head><body><h1>Selenium Bridge Bot Status</h1><p><b>Status:</b> {BOT_STATE['status']}</p><p><b>Uptime:</b> {uptime}</p><h2>Event Log</h2><pre>{'<br>'.join(BOT_STATE['event_log'])}</pre></body></html>"""
     return Response(html, mimetype='text/html')
+
+# NEW: This endpoint receives log messages from the JavaScript client
+@flask_app.route('/log', methods=['POST'])
+def receive_log():
+    data = request.json
+    if data and 'message' in data:
+        # Add a prefix to distinguish logs coming from the browser
+        log_event(f"[JS Client] {data['message']}")
+    return Response(status=204) # 204 No Content is a standard response for a logging endpoint
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -176,20 +241,8 @@ def start_bot(use_key_login):
     BOT_STATE["status"] = "Launching Browser..."
     log_event("Starting new Selenium session...")
     driver = setup_driver()
-
-    # --- PRE-EMPTIVE INJECTION TECHNIQUE ---
-    # 1. Navigate to a harmless blank page first.
-    log_event("Loading blank page for pre-emptive script injection...")
-    driver.get("about:blank")
-
-    # 2. Inject the performance-boosting script into the blank page.
-    log_event("Injecting performance booster before navigating to game...")
-    driver.execute_script(PERFORMANCE_BOOSTER_SCRIPT)
-    log_event("Performance script is now active and waiting.")
-
-    # 3. NOW, navigate to the actual game. The script is already active and will
-    #    neuter the game's heavy components the moment they try to load.
-    log_event(f"Navigating to invite link...")
+    
+    log_event("Navigating to invite link...")
     driver.get(SHIP_INVITE_LINK)
 
     try:
@@ -218,13 +271,13 @@ def start_bot(use_key_login):
         log_event(f"Critical error during login: {e}")
         raise
 
-    log_event("Waiting for chat to become available...")
+    log_event("Waiting for page to load before injecting client...")
     WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
-    log_event("Chat is available.")
+    log_event("Game loaded.")
 
-    log_event("Injecting main JavaScript client into the page...")
+    log_event("Injecting full JavaScript client into the page...")
     driver.execute_script(CLIENT_SIDE_SCRIPT)
-    log_event("JavaScript client injected successfully. Bot setup complete.")
+    log_event("JavaScript client injected. Bot setup complete.")
 
 # --- MAIN EXECUTION & LIFECYCLE MANAGEMENT ---
 def main():
@@ -235,13 +288,14 @@ def main():
     while failure_count < MAX_FAILURES:
         try:
             start_bot(use_key_login)
-            log_event("Bot is running. Monitoring game state.")
-            BOT_STATE["status"] = "Running (Client active)"
+            log_event("Bot is running. Python is now monitoring browser responsiveness.")
+            BOT_STATE["status"] = "Running (JS client is managing game state)"
             failure_count = 0
 
             while True:
-                time.sleep(90)
-                driver.find_element(By.ID, "chat-input")
+                time.sleep(60)
+                _ = driver.title 
+                log_event("Health Check: Browser process is responsive.")
 
         except Exception as e:
             failure_count += 1
