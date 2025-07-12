@@ -1,8 +1,7 @@
 # bot.py
-# FINAL DETAILED-LOGGING VERSION
-# This version adds a /log endpoint to the Flask server, allowing the JavaScript
-# client to send detailed, real-time status updates (like commands used)
-# back to the main event log on the status page.
+# FINAL SMOOTH-REJOIN VERSION
+# This version features a fully self-contained JavaScript client that handles
+# in-game disconnections and rejoins automatically without requiring a full script restart.
 
 import os
 import logging
@@ -12,8 +11,7 @@ import time
 from datetime import datetime
 from collections import deque
 
-# Note the addition of 'request' to handle incoming log data
-from flask import Flask, Response, request
+from flask import Flask, Response
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -34,15 +32,20 @@ if not SHIP_INVITE_LINK:
     exit(1)
 
 # --- JAVASCRIPT PAYLOADS ---
-# This client now contains a function to send logs back to the Python server.
+
+# This is the new, self-sufficient client with built-in rejoin logic.
 CLIENT_SIDE_SCRIPT = """
 (function() {
     'use strict';
 
-    if (window.kingdomChatClientLoaded) { return; }
+    if (window.kingdomChatClientLoaded) {
+        console.log('[Kingdom Chat] Client already loaded. Skipping injection.');
+        return;
+    }
     window.kingdomChatClientLoaded = true;
-    console.log('[Kingdom Chat] Initializing client with detailed logging...');
+    console.log('[Kingdom Chat] Initializing client with auto-rejoin logic...');
 
+    // --- Configuration & Message Queue ---
     const SERVER_URL = 'https://sortthechat.onrender.com/command';
     const MESSAGE_DELAY = 1200;
     const ZWSP = '\\u200B';
@@ -50,16 +53,6 @@ CLIENT_SIDE_SCRIPT = """
     let isProcessingQueue = false;
     let chatObserver = null;
     let disconnectMonitorInterval = null;
-
-    // NEW: Function to send log messages back to the Python/Flask server
-    function logToServer(message) {
-        fetch('/log', { // Use a relative URL to the log endpoint
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: message }),
-            keepalive: true // Helps ensure the request is sent even if the page is closing
-        }).catch(e => console.error("Failed to send log to server:", e));
-    }
 
     function sendChat(mess) {
         const chatBox = document.getElementById("chat");
@@ -70,10 +63,7 @@ CLIENT_SIDE_SCRIPT = """
         chatBtn?.click();
     }
 
-    function queueReply(message, sourceCommand) {
-        // Log what we're replying with
-        logToServer(`Queueing reply for command '${sourceCommand}'`);
-
+    function queueReply(message) {
         const MAX_CONTENT_LENGTH = 199;
         const splitLongMessage = (line) => {
             const chunks = []; let remainingText = String(line);
@@ -97,8 +87,10 @@ CLIENT_SIDE_SCRIPT = """
         sendChat(nextMessage); setTimeout(processQueue, MESSAGE_DELAY);
     }
 
+    // --- Chat Command Monitor ---
     function startChatMonitor() {
         if (chatObserver) return;
+        console.log("[Kingdom Chat] Starting chat command monitor...");
         const chatContent = document.getElementById("chat-content");
         if (!chatContent) return;
 
@@ -118,15 +110,12 @@ CLIENT_SIDE_SCRIPT = """
                     const command = parts[0];
                     if (!command.startsWith('!')) return;
 
-                    // Log the received command
-                    logToServer(`Received command '${commandText}' from player '${playerName}'`);
-
                     fetch(SERVER_URL, {
                         method: "POST", headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ playerName: playerName, command: command, args: parts.slice(1) })
                     }).then(response => response.json())
-                    .then(data => { if (data.replies && data.replies.length > 0) { queueReply(data.replies, command); }})
-                    .catch(error => logToServer(`Error processing command '${command}': ${error}`));
+                    .then(data => { if (data.replies && data.replies.length > 0) { queueReply(data.replies); }})
+                    .catch(error => console.error("[Kingdom Chat] Error sending command:", error));
                 });
             });
         });
@@ -134,12 +123,21 @@ CLIENT_SIDE_SCRIPT = """
     }
     
     function stopAllMonitors() {
-        if (chatObserver) { chatObserver.disconnect(); chatObserver = null; }
-        if (disconnectMonitorInterval) { clearInterval(disconnectMonitorInterval); disconnectMonitorInterval = null; }
+        if (chatObserver) {
+            chatObserver.disconnect();
+            chatObserver = null;
+            console.log('[Kingdom Chat] Chat monitor stopped.');
+        }
+        if (disconnectMonitorInterval) {
+            clearInterval(disconnectMonitorInterval);
+            disconnectMonitorInterval = null;
+            console.log('[Kingdom Chat] Disconnect monitor stopped.');
+        }
     }
 
+    // --- Automatic Rejoin Logic ---
     function handleRejoin() {
-        logToServer('Disconnect detected! Initiating automatic rejoin sequence.');
+        console.log('[Kingdom Chat] Disconnect detected! Initiating automatic rejoin sequence.');
         stopAllMonitors();
 
         const disconnectPopup = document.querySelector('div#disconnect-popup');
@@ -147,23 +145,24 @@ CLIENT_SIDE_SCRIPT = """
 
         if (returnButton) {
             returnButton.click();
-            logToServer('Clicked "Return to Menu". Waiting for menu screen...');
+            console.log('[Kingdom Chat] Clicked "Return to Menu". Waiting for menu screen...');
             const waitForMenu = setInterval(() => {
                 const playButton = document.querySelector("button.btn-large.btn-green[style*='display: block']");
                 if (playButton && playButton.textContent.includes('Play Anonymously')) {
                     clearInterval(waitForMenu);
-                    logToServer('Main menu detected. Reloading page to rejoin ship...');
+                    console.log('[Kingdom Chat] Main menu detected. Reloading page to rejoin ship...');
                     location.reload();
                 }
             }, 1000);
         } else {
-            logToServer('Could not find disconnect popup. Reloading page as a failsafe...');
+            console.log('[Kingdom Chat] Could not find disconnect popup. Reloading page as a failsafe...');
             location.reload();
         }
     }
 
     function startDisconnectMonitor() {
         if (disconnectMonitorInterval) return;
+        console.log('[Kingdom Chat] Starting disconnect monitor...');
         disconnectMonitorInterval = setInterval(() => {
             const disconnectPopup = document.querySelector('div#disconnect-popup');
             if (disconnectPopup && disconnectPopup.offsetParent !== null) {
@@ -172,17 +171,19 @@ CLIENT_SIDE_SCRIPT = """
         }, 5000);
     }
 
+    // --- Main Initialization Logic ---
     function initialize() {
         const waitForGame = setInterval(() => {
             if (document.getElementById("chat-content")) {
                 clearInterval(waitForGame);
-                logToServer('Game detected! Client is active.');
-                queueReply("👑 Kingdom Chat Client connected. Auto-rejoin is active.");
+                console.log('[Kingdom Chat] Game detected!');
+                queueReply("👑 Kingdom Chat Client connected. Auto-rejoin logic is active.");
                 startChatMonitor();
                 startDisconnectMonitor();
             }
         }, 500);
     }
+
     initialize();
 })();
 """
@@ -220,15 +221,6 @@ def health_check():
     uptime = str(datetime.now() - BOT_STATE['start_time']).split('.')[0]
     html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10"><title>Bot Status</title><style>body{{font-family:monospace;background-color:#1e1e1e;color:#d4d4d4;}}</style></head><body><h1>Selenium Bridge Bot Status</h1><p><b>Status:</b> {BOT_STATE['status']}</p><p><b>Uptime:</b> {uptime}</p><h2>Event Log</h2><pre>{'<br>'.join(BOT_STATE['event_log'])}</pre></body></html>"""
     return Response(html, mimetype='text/html')
-
-# NEW: This endpoint receives log messages from the JavaScript client
-@flask_app.route('/log', methods=['POST'])
-def receive_log():
-    data = request.json
-    if data and 'message' in data:
-        # Add a prefix to distinguish logs coming from the browser
-        log_event(f"[JS Client] {data['message']}")
-    return Response(status=204) # 204 No Content is a standard response for a logging endpoint
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -277,7 +269,7 @@ def start_bot(use_key_login):
 
     log_event("Injecting full JavaScript client into the page...")
     driver.execute_script(CLIENT_SIDE_SCRIPT)
-    log_event("JavaScript client injected. Bot setup complete.")
+    log_event("JavaScript client injected successfully. Bot setup complete.")
 
 # --- MAIN EXECUTION & LIFECYCLE MANAGEMENT ---
 def main():
@@ -292,10 +284,12 @@ def main():
             BOT_STATE["status"] = "Running (JS client is managing game state)"
             failure_count = 0
 
+            # NEW, more lenient health check. Lets the JS handle in-game disconnects.
+            # Only fails if the entire browser process dies.
             while True:
                 time.sleep(60)
-                _ = driver.title 
-                log_event("Health Check: Browser process is responsive.")
+                _ = driver.title # A lightweight check to see if the browser is still alive.
+                logging.info("Health Check: Browser process is responsive.")
 
         except Exception as e:
             failure_count += 1
