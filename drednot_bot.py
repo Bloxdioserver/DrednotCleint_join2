@@ -32,7 +32,7 @@ from selenium.common.exceptions import WebDriverException, TimeoutException
 # BOT_SERVER_URL = os.environ.get("BOT_SERVER_URL") 
 # API_KEY = 'drednot123'
 
-SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
+SHIP_INVITE_LINK = 'https://drednot.io/invite/Wu5aTltskmcqkFP8rI0LW3Ws'
 ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT'
 
 # Bot Behavior
