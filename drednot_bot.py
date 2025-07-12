@@ -1,7 +1,7 @@
 # FUSED DEFINITIVE VERSION - MEMORY & STABILITY ENHANCED
 # This script incorporates all previous enhancements and adds new features
 # to combat out-of-memory errors and prevent crash loops ("thrashing").
-# VERSION 4.1: Fixes a TypeError in the logging configuration.
+# VERSION 4.2: Fixes an UnboundLocalError by correctly handling global scope.
 
 import os
 import gc
@@ -28,14 +28,13 @@ INACTIVITY_TIMEOUT_SECONDS = 3 * 60
 MAIN_LOOP_POLLING_INTERVAL_SECONDS = 1.0
 
 # --- LOGGING & VALIDATION ---
-# THIS LINE IS NOW CORRECTED
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 if not SHIP_INVITE_LINK:
     logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!")
     exit(1)
 
-# --- JAVASCRIPT PAYLOADS (Unchanged) ---
+# --- JAVASCRIPT PAYLOADS ---
 PERFORMANCE_BOOSTER_SCRIPT = """
 console.log('[PerfBooster] Applying aggressive optimizations...');
 window.requestAnimationFrame = () => {}; window.cancelAnimationFrame = () => {};
@@ -106,7 +105,7 @@ def run_flask():
     logging.info(f"Health check server listening on http://0.0.0.0:{port}")
     flask_app.run(host='0.0.0.0', port=port)
 
-# --- REJOIN LOGIC ---
+# --- CORE BOT FUNCTIONS ---
 def reset_inactivity_timer():
     global inactivity_timer
     if inactivity_timer: inactivity_timer.cancel()
@@ -127,7 +126,7 @@ def attempt_soft_rejoin():
             except: pass
         wait = WebDriverWait(driver, 20)
         wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
-        clicked = driver.execute_script("const sid = arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===sid);if(s){s.click();return true}return false", ship_id)
+        clicked = driver.execute_script("const sid=arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===sid);if(s){s.click();return true}return false", ship_id)
         if not clicked: raise RuntimeError(f"Could not find ship {ship_id}")
         wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
         log_event("✅ Soft rejoin successful!"); BOT_STATE["status"] = "Running"; reset_inactivity_timer()
@@ -135,7 +134,6 @@ def attempt_soft_rejoin():
         log_event(f"Soft rejoin FAILED: {e}. Triggering hard restart.")
         if driver: driver.quit()
 
-# --- BOT STARTUP LOGIC ---
 def start_bot(use_key_login):
     global driver
     BOT_STATE["status"] = "Launching Browser..."
@@ -175,6 +173,9 @@ def start_bot(use_key_login):
 
 # --- MAIN EXECUTION & LIFECYCLE MANAGEMENT ---
 def main():
+    # THIS IS THE FIX: Declare intent to modify the global `driver` variable.
+    global driver 
+    
     threading.Thread(target=run_flask, daemon=True).start()
     use_key_login = True
     failure_count = 0
@@ -227,7 +228,7 @@ def main():
             if driver:
                 try: driver.quit()
                 except Exception: pass
-                driver = None
+                driver = None # This assignment is now safe because of `global driver`
             gc.collect()
 
             if failure_count < MAX_FAILURES:
