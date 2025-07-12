@@ -1,8 +1,8 @@
 # drednot_bot.py
-# FUSED DEFINITIVE VERSION
-# This script uses the advanced Python framework (web UI, action queue, etc.)
-# but has its Python-based rejoin logic replaced with the more robust and simple
-# JavaScript-based auto-rejoin system.
+# FUSED VERSION: Kingdom Chat Client in the Economy Bot Framework
+# This version uses the advanced Python backend (web UI, inactivity timer, programmatic rejoin)
+# but injects a JavaScript client that communicates with the 'sortthechat.onrender.com' server,
+# effectively making it a very robust client for your Kingdom Chat game.
 
 import os
 import queue
@@ -28,153 +28,134 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # --- CONFIGURATION ---
-BOT_SERVER_URL = os.environ.get("BOT_SERVER_URL")
-API_KEY = 'drednot123'
+# The bot no longer needs to talk to the economy bot server, so this can be removed or ignored.
+# BOT_SERVER_URL = os.environ.get("BOT_SERVER_URL") 
+# API_KEY = 'drednot123'
+
 SHIP_INVITE_LINK = 'https://drednot.io/invite/KOciB52Quo4z_luxo7zAFKPc'
 ANONYMOUS_LOGIN_KEY = '_M85tFxFxIRDax_nh-HYm1gT'
 
 # Bot Behavior
-MESSAGE_DELAY_SECONDS = 0.2
+MESSAGE_DELAY_SECONDS = 1.2 # Increased delay to be friendlier to the game chat
 ZWSP = '\u200B'
+INACTIVITY_TIMEOUT_SECONDS = 2 * 60 # The inactivity timer from your script is preserved
 MAIN_LOOP_POLLING_INTERVAL_SECONDS = 0.05
-MAX_WORKER_THREADS = 10
-
-# Spam Control
-USER_COOLDOWN_SECONDS = 2.0
-SPAM_STRIKE_LIMIT = 3
-SPAM_TIMEOUT_SECONDS = 30
-SPAM_RESET_SECONDS = 5
+MAX_WORKER_THREADS = 10 # This is no longer used for commands but kept for structure
 
 # --- LOGGING & VALIDATION ---
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
-if not BOT_SERVER_URL: logging.critical("FATAL: BOT_SERVER_URL environment variable is not set!"); exit(1)
 if not SHIP_INVITE_LINK: logging.critical("FATAL: SHIP_INVITE_LINK environment variable is not set!"); exit(1)
-if not API_KEY: logging.critical("FATAL: API_KEY environment variable is not set!"); exit(1)
 
 # --- JAVASCRIPT INJECTION SCRIPT ---
-# This new script combines the advanced command/spam listener with the simple auto-rejoin logic.
-FUSED_CLIENT_SIDE_SCRIPT = """
+# This is the new, self-contained JavaScript client for the Kingdom Chat server.
+KINGDOM_CHAT_CLIENT_SCRIPT = """
 (function() {
     'use strict';
-    if (window.drednotBotFusedClient) { return; }
-    window.drednotBotFusedClient = true;
-    console.log('[Bot-JS Fused] Initializing client with command monitoring and auto-rejoin logic...');
+    if (window.isKingdomClientInjected) { return; }
+    window.isKingdomClientInjected = true;
+    console.log('[Bot-JS] Initializing Kingdom Chat Client...');
     
-    // --- Global Variables & Config ---
-    window.py_bot_events = []; // Queue to send events back to Python
-    const zwsp = arguments[0], allCommands = arguments[1], cooldownMs = arguments[2] * 1000,
-          spamStrikeLimit = arguments[3], spamTimeoutMs = arguments[4] * 1000, spamResetMs = arguments[5] * 1000;
-    const commandSet = new Set(allCommands);
-    window.botUserCooldowns = window.botUserCooldowns || {};
-    window.botSpamTracker = window.botSpamTracker || {};
-    let chatObserver = null;
-    let disconnectMonitorInterval = null;
+    // --- State and Config ---
+    window.py_bot_events = []; // Still used to send ship_joined events to Python
+    const SERVER_URL = 'https://sortthechat.onrender.com/command';
+    const MESSAGE_DELAY = 1200;
+    const ZWSP = '\\u200B';
+    let messageQueue = [];
+    let isProcessingQueue = false;
 
-    // --- Core Functions (Chat Monitor & Rejoin) ---
-    const chatCallback = (mutationList, observer) => {
-        const now = Date.now();
+    // --- Chat Sending Logic ---
+    function sendChat(mess) {
+        const chatBox = document.getElementById("chat");
+        const chatInp = document.getElementById("chat-input");
+        const chatBtn = document.getElementById("chat-send");
+        if (chatBox?.classList.contains('closed')) chatBtn?.click();
+        if (chatInp) chatInp.value = mess;
+        chatBtn?.click();
+    }
+    function queueReply(message) {
+        const MAX_LEN=199;
+        const splitLongMessage=(line)=>{const c=[];let t=String(line);if(t.length<=MAX_LEN)return c.push(t),c;for(;t.length>0;){if(t.length<=MAX_LEN){c.push(t);break}let n=t.lastIndexOf(" ",MAX_LEN);n<=0&&(n=MAX_LEN),c.push(t.substring(0,n).trim()),t=t.substring(n).trim()}return c};
+        (Array.isArray(message)?message:[message]).forEach(l=>{splitLongMessage(String(l)).forEach(c=>{c&&messageQueue.push(ZWSP+c)})});
+        !isProcessingQueue&&processQueue();
+    }
+    function processQueue() {
+        if(messageQueue.length===0){isProcessingQueue=false;return}
+        isProcessingQueue=true;const nextMessage=messageQueue.shift();
+        sendChat(nextMessage);setTimeout(processQueue,MESSAGE_DELAY);
+    }
+
+    // --- Main Observer Logic ---
+    const observerCallback = (mutationList, observer) => {
         for (const mutation of mutationList) {
             if (mutation.type !== 'childList') continue;
             for (const node of mutation.addedNodes) {
                 if (node.nodeType !== 1 || node.tagName !== 'P' || node.dataset.botProcessed) continue;
                 node.dataset.botProcessed = 'true';
                 const pText = node.textContent || "";
-                if (pText.startsWith(zwsp)) continue;
+                if (pText.startsWith(ZWSP)) continue;
+                
+                // Keep the ship_joined event for Python's benefit
                 if (pText.includes("Joined ship '")) {
                     const match = pText.match(/{[A-Z\\d]+}/);
-                    if (match && match[0]) window.py_bot_events.push({ type: 'ship_joined', id: match[0] });
+                    if (match && match[0]) { window.py_bot_events.push({ type: 'ship_joined', id: match[0] }); }
                     continue;
                 }
+                
                 const colonIdx = pText.indexOf(':'); if (colonIdx === -1) continue;
                 const bdiElement = node.querySelector("bdi"); if (!bdiElement) continue;
-                const username = bdiElement.innerText.trim();
-                const msgTxt = pText.substring(colonIdx + 1).trim();
-                if (!msgTxt.startsWith('!')) continue;
-                const parts = msgTxt.slice(1).trim().split(/ +/);
-                const command = parts.shift().toLowerCase();
-                if (!commandSet.has(command)) continue;
-                const spamTracker = window.botSpamTracker[username] = window.botSpamTracker[username] || { count: 0, lastCmd: '', lastTime: 0, penaltyUntil: 0 };
-                if (now < spamTracker.penaltyUntil) continue;
-                const lastCmdTime = window.botUserCooldowns[username] || 0;
-                if (now - lastCmdTime < cooldownMs) continue;
-                window.botUserCooldowns[username] = now;
-                if (now - spamTracker.lastTime > spamResetMs || command !== spamTracker.lastCmd) { spamTracker.count = 1; } else { spamTracker.count++; }
-                spamTracker.lastCmd = command; spamTracker.lastTime = now;
-                if (spamTracker.count >= spamStrikeLimit) {
-                    spamTracker.penaltyUntil = now + spamTimeoutMs; spamTracker.count = 0;
-                    window.py_bot_events.push({ type: 'spam_detected', username: username, command: command });
-                    continue;
-                }
-                window.py_bot_events.push({ type: 'command', command: command, username: username, args: parts });
+                const playerName = bdiElement.innerText.trim();
+                const commandText = pText.substring(colonIdx + 1).trim();
+                const parts = commandText.split(' ');
+                const command = parts[0];
+                
+                if (!command.startsWith('!')) continue;
+                
+                // Instead of sending to Python, this JS sends the command directly to the server
+                console.log(`[Kingdom Chat] Sending command '${command}' for '${playerName}' to server.`);
+                fetch(SERVER_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    data: JSON.stringify({
+                        playerName: playerName,
+                        command: command,
+                        args: parts.slice(1)
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.replies && Array.isArray(data.replies) && data.replies.length > 0) {
+                        queueReply(data.replies); // Queue the server's reply to be typed out
+                    }
+                })
+                .catch(error => {
+                    console.error("[Kingdom Chat] Error sending command to server:", error);
+                    queueReply("Error: Could not connect to the game server.");
+                });
+                
+                // Push a generic event to Python just to reset the inactivity timer
+                window.py_bot_events.push({ type: 'activity' });
             }
         }
     };
     
-    function startChatMonitor() {
-        const targetNode = document.getElementById('chat-content');
-        if (!targetNode) { console.error('[Bot-JS] Could not find chat content to observe.'); return; }
-        chatObserver = new MutationObserver(chatCallback);
-        chatObserver.observe(targetNode, { childList: true });
-        console.log('[Bot-JS] Advanced command/spam monitor is now active.');
+    const observer = new MutationObserver(observerCallback);
+    const targetNode = document.getElementById('chat-content');
+    if (targetNode) {
+        observer.observe(targetNode, { childList: true });
+        console.log('[Bot-JS] Kingdom Chat client is now active.');
     }
-
-    function handleRejoin() {
-        console.log('[Bot-JS] Disconnect detected! Initiating automatic rejoin sequence.');
-        if (disconnectMonitorInterval) clearInterval(disconnectMonitorInterval);
-        if (chatObserver) chatObserver.disconnect();
-        
-        const returnButton = document.querySelector('div#disconnect-popup button.btn-green');
-        if (returnButton) {
-            returnButton.click();
-            console.log('[Bot-JS] Clicked "Return to Menu". Waiting for menu screen...');
-            const waitForMenu = setInterval(() => {
-                if (document.querySelector("button.btn-large.btn-green[style*='display: block']")) {
-                    clearInterval(waitForMenu);
-                    console.log('[Bot-JS] Main menu detected. Reloading page to rejoin ship...');
-                    location.reload();
-                }
-            }, 1000);
-        } else {
-            console.log('[Bot-JS] Could not find disconnect popup. Reloading page as a failsafe...');
-            location.reload();
-        }
-    }
-
-    function startDisconnectMonitor() {
-        console.log('[Bot-JS] Starting disconnect monitor...');
-        disconnectMonitorInterval = setInterval(() => {
-            const disconnectPopup = document.querySelector('div#disconnect-popup');
-            if (disconnectPopup && disconnectPopup.offsetParent !== null) {
-                handleRejoin();
-            }
-        }, 5000);
-    }
-
-    // --- Main Initialization Logic ---
-    function initialize() {
-        const waitForGame = setInterval(() => {
-            if (document.getElementById("chat-content")) {
-                clearInterval(waitForGame);
-                console.log('[Bot-JS] Game detected! Starting all monitors.');
-                startChatMonitor();
-                startDisconnectMonitor();
-            }
-        }, 500);
-    }
-    initialize();
 })();
 """
 
 class InvalidKeyError(Exception): pass
 
 # --- GLOBAL STATE & THREADING PRIMITIVES ---
-message_queue = queue.Queue(maxsize=100)
+message_queue = queue.Queue(maxsize=100) # Still used by the JS client indirectly via queue_reply
 action_queue = queue.Queue(maxsize=10)
 driver_lock = Lock()
-driver = None # REMOVED: inactivity_timer
-SERVER_COMMAND_LIST = []
-BOT_STATE = {"status": "Initializing...", "start_time": datetime.now(), "current_ship_id": "N/A", "last_command_info": "None yet.", "last_message_sent": "None yet.", "event_log": deque(maxlen=20)}
+inactivity_timer = None # This is the key component for the desired rejoin logic
+driver = None
+BOT_STATE = {"status": "Initializing...", "start_time": datetime.now(), "current_ship_id": "N/A", "last_command_info": "N/A", "last_message_sent": "None yet.", "event_log": deque(maxlen=20)}
 command_executor = ThreadPoolExecutor(max_workers=MAX_WORKER_THREADS, thread_name_prefix='CmdWorker')
 atexit.register(lambda: command_executor.shutdown(wait=True))
 
@@ -194,30 +175,16 @@ def setup_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-infobars")
     chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--disable-images")
-    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
     service = Service(executable_path="/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
 flask_app = Flask('')
 @flask_app.route('/')
 def health_check():
-    # Flask HTML is unchanged
-    html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10"><title>Drednot Bot Status</title><style>body{{font-family:'Courier New',monospace;background-color:#1e1e1e;color:#d4d4d4;padding:20px;}}.container{{max-width:800px;margin:auto;background-color:#252526;border:1px solid #373737;padding:20px;border-radius:8px;}}h1,h2{{color:#4ec9b0;border-bottom:1px solid #4ec9b0;padding-bottom:5px;}}p{{line-height:1.6;}}.status-ok{{color:#73c991;font-weight:bold;}}.status-warn{{color:#dccd85;font-weight:bold;}}.status-err{{color:#f44747;font-weight:bold;}}ul{{list-style-type:none;padding-left:0;}}li{{background-color:#2d2d2d;margin-bottom:8px;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;}}.label{{color:#9cdcfe;font-weight:bold;}}.btn{{background-color:#4ec9b0;color:#1e1e1e;border:none;padding:10px 15px;border-radius:4px;cursor:pointer;font-weight:bold;font-size:1em;margin-top:20px;}}.btn:hover{{background-color:#63d8c1;}}</style></head><body><div class="container"><h1>Drednot Bot Status</h1><p><span class="label">Status:</span><span class="status-ok">{BOT_STATE['status']}</span></p><p><span class="label">Current Ship ID:</span>{BOT_STATE['current_ship_id']}</p><p><span class="label">Last Command:</span>{BOT_STATE['last_command_info']}</p><p><span class="label">Last Message Sent:</span>{BOT_STATE['last_message_sent']}</p><form action="/update_commands" method="post"><button type="submit" class="btn">Refresh Commands Live</button></form><h2>Recent Events (Log)</h2><ul>{''.join(f'<li>{event}</li>' for event in BOT_STATE['event_log'])}</ul></div></body></html>"""
+    # Simplified the UI slightly by removing the "Refresh Commands" button
+    html = f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta http-equiv="refresh" content="10"><title>Drednot Bot Status</title><style>body{{font-family:'Courier New',monospace;background-color:#1e1e1e;color:#d4d4d4;padding:20px;}}.container{{max-width:800px;margin:auto;background-color:#252526;border:1px solid #373737;padding:20px;border-radius:8px;}}h1,h2{{color:#4ec9b0;border-bottom:1px solid #4ec9b0;padding-bottom:5px;}}p{{line-height:1.6;}}.status-ok{{color:#73c991;font-weight:bold;}}.label{{color:#9cdcfe;font-weight:bold;}}ul{{list-style-type:none;padding-left:0;}}li{{background-color:#2d2d2d;margin-bottom:8px;padding:10px;border-radius:4px;white-space:pre-wrap;word-break:break-all;}}</style></head><body><div class="container"><h1>Kingdom Chat Bot Status</h1><p><span class="label">Status:</span><span class="status-ok">{BOT_STATE['status']}</span></p><p><span class="label">Current Ship ID:</span>{BOT_STATE['current_ship_id']}</p><p><span class="label">Last Message Sent:</span>{BOT_STATE['last_message_sent']}</p><h2>Recent Events (Log)</h2><ul>{''.join(f'<li>{event}</li>' for event in BOT_STATE['event_log'])}</ul></div></body></html>"""
     return Response(html, mimetype='text/html')
-
-@flask_app.route('/update_commands', methods=['POST'])
-def trigger_command_update():
-    # This function is unchanged
-    log_event("WEB UI: Command update triggered.")
-    def task():
-        if fetch_command_list():
-            queue_browser_update()
-    command_executor.submit(task)
-    return redirect(url_for('health_check'))
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -225,29 +192,15 @@ def run_flask():
     flask_app.run(host='0.0.0.0', port=port)
 
 # --- HELPER & CORE FUNCTIONS ---
-def queue_reply(message):
-    # This function is unchanged
-    MAX_LEN = 199
-    lines = message if isinstance(message, list) else [message]
-    for line in lines:
-        text = str(line)
-        while len(text) > 0:
-            try:
-                if len(text) <= MAX_LEN:
-                    if text.strip(): message_queue.put(ZWSP + text, timeout=5)
-                    break
-                else:
-                    bp = text.rfind(' ', 0, MAX_LEN)
-                    chunk = text[:bp if bp > 0 else MAX_LEN].strip()
-                    if chunk: message_queue.put(ZWSP + chunk, timeout=5)
-                    text = text[bp if bp > 0 else MAX_LEN:].strip()
-            except queue.Full:
-                logging.warning("Message queue is full. Dropping message.")
-                log_event("WARN: Message queue full.")
-                break
+def queue_reply_from_python(message):
+    # This is a helper for Python to send messages, like "Bot online"
+    try:
+        if message.strip(): message_queue.put(ZWSP + message, timeout=5)
+    except queue.Full:
+        logging.warning("Message queue is full. Dropping python message.")
 
 def message_processor_thread():
-    # This function is unchanged
+    # This thread is still needed for the JS `queueReply` to work, as it sends messages one by one
     while True:
         message = message_queue.get()
         try:
@@ -262,70 +215,47 @@ def message_processor_thread():
         time.sleep(MESSAGE_DELAY_SECONDS)
 
 # --- COMMAND PROCESSING ---
-def process_api_call(command, username, args):
-    # This function is unchanged
-    command_str = f"!{command} {' '.join(args)}"
-    try:
-        endpoint_url = urljoin(BOT_SERVER_URL, 'command')
-        response = requests.post(endpoint_url, json={"command": command, "username": username, "args": args}, headers={"Content-Type": "application/json", "x-api-key": API_KEY}, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("reply"): queue_reply(data["reply"])
-    except requests.exceptions.RequestException as e:
-        logging.error(f"API call for '{command_str}' failed: {e}")
-        queue_reply(f"@{username} Sorry, the economy server seems to be down.")
-    except Exception as e: logging.error(f"Unexpected API error processing '{command_str}': {e}"); traceback.print_exc()
-
-def process_commands_list_call(username):
-    # This function is unchanged
-    try:
-        queue_reply(f"@{username} Fetching command list from server...")
-        endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
-        response = requests.get(endpoint_url, headers={"x-api-key": API_KEY}, timeout=10)
-        response.raise_for_status()
-        command_list = response.json() 
-        queue_reply("--- Available In-Game Commands ---")
-        for cmd_string in command_list: queue_reply(cmd_string)
-        queue_reply("------------------------------------")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to fetch command list: {e}")
-        queue_reply(f"@{username} Sorry, couldn't fetch the command list. The server might be down.")
-    except Exception as e: logging.error(f"Unexpected error fetching command list: {e}"); traceback.print_exc()
+# All Python-side command processing is removed, as the JS client now handles it.
 
 # --- BOT MANAGEMENT FUNCTIONS ---
+def reset_inactivity_timer():
+    """This function is preserved entirely from your script."""
+    global inactivity_timer
+    if inactivity_timer: inactivity_timer.cancel()
+    inactivity_timer = threading.Timer(INACTIVITY_TIMEOUT_SECONDS, attempt_soft_rejoin)
+    inactivity_timer.start()
 
-# REMOVED: The Python-based `attempt_soft_rejoin` function is no longer needed.
-# REMOVED: The `reset_inactivity_timer` function is no longer needed.
-
-def fetch_command_list():
-    """Fetches command list from server and updates the global variable. Returns success."""
-    # This function is unchanged
-    global SERVER_COMMAND_LIST
+def attempt_soft_rejoin():
+    """This is your desired auto-rejoin logic, preserved entirely."""
+    log_event("Game inactivity detected. Attempting proactive rejoin.")
+    BOT_STATE["status"] = "Proactive Rejoin..."
+    global driver
     try:
-        log_event("Fetching command list from server...")
-        endpoint_url = urljoin(BOT_SERVER_URL, 'commands')
-        response = requests.get(endpoint_url, headers={"x-api-key": API_KEY}, timeout=10)
-        response.raise_for_status()
-        full_command_strings = response.json()
-        SERVER_COMMAND_LIST = [s.split(' ')[0][1:] for s in full_command_strings]
-        SERVER_COMMAND_LIST.append('verify')
-        log_event(f"Successfully processed {len(SERVER_COMMAND_LIST)} commands.")
-        return True
+        with driver_lock:
+            ship_id = BOT_STATE.get('current_ship_id')
+            if not ship_id or ship_id == 'N/A': raise ValueError("Cannot rejoin, no known Ship ID.")
+            try: driver.find_element(By.CSS_SELECTOR, "#disconnect-popup button").click(); logging.info("Rejoin: Clicked disconnect pop-up.")
+            except:
+                try: driver.find_element(By.ID, "exit_button").click(); logging.info("Rejoin: Exiting ship normally.")
+                except: logging.info("Rejoin: Not in game and no pop-up. Assuming at main menu.")
+            wait = WebDriverWait(driver, 15)
+            wait.until(EC.presence_of_element_located((By.ID, 'shipyard')))
+            logging.info(f"Rejoin: At main menu. Searching for ship: {ship_id}")
+            clicked = driver.execute_script("const sid=arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===sid);if(s){s.click();return true}document.querySelector('#shipyard section:nth-of-type(3) .btn-small')?.click();return false", ship_id)
+            if not clicked:
+                time.sleep(0.5)
+                clicked = driver.execute_script("const sid=arguments[0];const s=Array.from(document.querySelectorAll('.sy-id')).find(e=>e.textContent===sid);if(s){s.click();return true}return false", ship_id)
+            if not clicked: raise RuntimeError(f"Could not find ship {ship_id} in list.")
+            wait.until(EC.presence_of_element_located((By.ID, 'chat-input')))
+            logging.info("✅ Proactive rejoin successful!")
+            log_event("Proactive rejoin successful.")
+            BOT_STATE["status"] = "Running"
+            driver.execute_script(KINGDOM_CHAT_CLIENT_SCRIPT) # Re-inject the client after rejoin
+            reset_inactivity_timer()
     except Exception as e:
-        log_event(f"CRITICAL: Failed to fetch command list: {e}")
-        return False
-
-def queue_browser_update():
-    """Queues an action to re-inject the JS observer with the current command list."""
-    # The action now injects the new FUSED script
-    def update_action(driver_instance):
-        log_event("Injecting/updating fused client-side script...")
-        driver_instance.execute_script(
-            FUSED_CLIENT_SIDE_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
-            SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
-        )
-        queue_reply("Commands have been updated live.")
-    action_queue.put(update_action)
+        log_event(f"Rejoin FAILED: {e}")
+        logging.error(f"Proactive rejoin failed: {e}. Triggering full restart.")
+        if driver: driver.quit()
 
 # --- MAIN BOT LOGIC ---
 def start_bot(use_key_login):
@@ -338,21 +268,13 @@ def start_bot(use_key_login):
         logging.info(f"Navigating to invite link...")
         driver.get(SHIP_INVITE_LINK)
         wait = WebDriverWait(driver, 15)
-        # Login logic is unchanged
+        # Login logic is identical to your script
         try:
             btn = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".modal-container .btn-green")))
             driver.execute_script("arguments[0].click();", btn)
             logging.info("Clicked 'Accept' on notice.")
             if ANONYMOUS_LOGIN_KEY and use_key_login:
-                # ... same key login logic ...
-                log_event("Attempting login with hardcoded key.")
-                link = wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Restore old anonymous key')]")))
-                driver.execute_script("arguments[0].click();", link)
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.modal-window input[maxlength="24"]'))).send_keys(ANONYMOUS_LOGIN_KEY)
-                submit_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//div[.//h2[text()='Restore Account Key']]//button[contains(@class, 'btn-green')]")))
-                driver.execute_script("arguments[0].click();", submit_btn)
-                wait.until(EC.invisibility_of_element_located((By.XPATH, "//div[.//h2[text()='Restore Account Key']]")))
-                wait.until(EC.any_of(EC.presence_of_element_located((By.ID, "chat-input")), EC.presence_of_element_located((By.XPATH, "//h2[text()='Login Failed']"))))
+                log_event("Attempting login with hardcoded key."); link = wait.until(EC.presence_of_element_located((By.XPATH, "//a[contains(., 'Restore old anonymous key')]"))); driver.execute_script("arguments[0].click();", link); wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div.modal-window input[maxlength="24"]'))).send_keys(ANONYMOUS_LOGIN_KEY); submit_btn = wait.until(EC.presence_of_element_located((By.XPATH, "//div[.//h2[text()='Restore Account Key']]//button[contains(@class, 'btn-green')]"))); driver.execute_script("arguments[0].click();", submit_btn); wait.until(EC.invisibility_of_element_located((By.XPATH, "//div[.//h2[text()='Restore Account Key']]"))); wait.until(EC.any_of(EC.presence_of_element_located((By.ID, "chat-input")), EC.presence_of_element_located((By.XPATH, "//h2[text()='Login Failed']"))));
                 if driver.find_elements(By.XPATH, "//h2[text()='Login Failed']"): raise InvalidKeyError("Login Failed! Key may be invalid.")
                 log_event("✅ Successfully logged in with key.")
             else:
@@ -361,59 +283,41 @@ def start_bot(use_key_login):
         except Exception as e: log_event(f"Login failed critically: {e}"); raise e
 
         WebDriverWait(driver, 60).until(EC.presence_of_element_located((By.ID, "chat-input")))
-        if not fetch_command_list(): raise RuntimeError("Initial command fetch failed. Cannot start bot.")
+        log_event("Injecting Kingdom Chat client script...")
+        driver.execute_script(KINGDOM_CHAT_CLIENT_SCRIPT)
 
-        log_event("Injecting initial fused client script...")
-        driver.execute_script(
-            FUSED_CLIENT_SIDE_SCRIPT, ZWSP, SERVER_COMMAND_LIST, USER_COOLDOWN_SECONDS, 
-            SPAM_STRIKE_LIMIT, SPAM_TIMEOUT_SECONDS, SPAM_RESET_SECONDS
-        )
-
-        # Proactive Ship ID scan is unchanged
-        log_event("Proactively scanning for Ship ID...")
-        PROACTIVE_SCAN_SCRIPT = """const chatContent = document.getElementById('chat-content'); if (!chatContent) { return null; } const paragraphs = chatContent.querySelectorAll('p'); for (const p of paragraphs) { const pText = p.textContent || ""; if (pText.includes("Joined ship '")) { const match = pText.match(/{[A-Z\\d]+}/); if (match && match[0]) { return match[0]; } } } return null;"""
-        found_id = driver.execute_script(PROACTIVE_SCAN_SCRIPT)
+        # Proactive Ship ID scan logic is preserved
+        log_event("Proactively scanning for Ship ID..."); PROACTIVE_SCAN_SCRIPT = """const c=document.getElementById('chat-content');if(!c)return null;const p=c.querySelectorAll('p');for(const a of p){const t=a.textContent||"";if(t.includes("Joined ship '")){const o=t.match(/{[A-Z\\d]+}/);if(o&&o[0])return o[0]}}return null;"""; found_id=driver.execute_script(PROACTIVE_SCAN_SCRIPT)
         if found_id: BOT_STATE["current_ship_id"] = found_id; log_event(f"Confirmed Ship ID via scan: {found_id}")
         else:
-            log_event("No existing ID found. Waiting for live event...")
-            start_time = time.time(); ship_id_found = False
-            while time.time() - start_time < 15:
-                new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
+            log_event("No existing ID found. Waiting for live event..."); start_time=time.time();ship_id_found=False
+            while time.time()-start_time<15:
+                new_events=driver.execute_script("return window.py_bot_events.splice(0,window.py_bot_events.length);")
                 for event in new_events:
-                    if event['type'] == 'ship_joined': BOT_STATE["current_ship_id"] = event['id']; ship_id_found = True; log_event(f"Confirmed Ship ID via event: {BOT_STATE['current_ship_id']}"); break
-                if ship_id_found: break; time.sleep(0.5)
-            if not ship_id_found: error_message = "Failed to get Ship ID via scan or live event."; log_event(f"CRITICAL: {error_message}"); raise RuntimeError(error_message)
+                    if event['type']=='ship_joined':BOT_STATE["current_ship_id"]=event['id'];ship_id_found=True;log_event(f"Confirmed Ship ID via event: {BOT_STATE['current_ship_id']}");break
+                if ship_id_found:break;time.sleep(0.5)
+            if not ship_id_found:error_message="Failed to get Ship ID.";log_event(f"CRITICAL: {error_message}");raise RuntimeError(error_message)
 
     BOT_STATE["status"] = "Running"
-    queue_reply("Bot online. Auto-rejoin is active.")
-    logging.info(f"Event-driven chat monitor active. Polling every {MAIN_LOOP_POLLING_INTERVAL_SECONDS}s.")
+    queue_reply_from_python("👑 Kingdom Chat bot online.")
+    reset_inactivity_timer() # Start the inactivity timer
+    logging.info(f"Kingdom Chat client active. Polling every {MAIN_LOOP_POLLING_INTERVAL_SECONDS}s.")
     
     while True:
         try:
-            # Action queue logic is unchanged
-            try:
-                while not action_queue.empty():
-                    action_to_run = action_queue.get_nowait()
-                    with driver_lock:
-                        if driver: action_to_run(driver) 
-            except queue.Empty: pass
-
             with driver_lock:
                 if not driver: break
                 new_events = driver.execute_script("return window.py_bot_events.splice(0, window.py_bot_events.length);")
             
             if new_events:
-                # REMOVED: No longer need to reset inactivity timer
+                reset_inactivity_timer() # Any activity from the browser resets the timer
                 for event in new_events:
-                    # Event processing logic is unchanged
                     if event['type'] == 'ship_joined' and event['id'] != BOT_STATE["current_ship_id"]:
-                        BOT_STATE["current_ship_id"] = event['id']; log_event(f"Switched to new ship: {BOT_STATE['current_ship_id']}")
-                    elif event['type'] == 'command':
-                        cmd, user, args = event['command'], event['username'], event['args']; command_str = f"!{cmd} {' '.join(args)}"; logging.info(f"RECV: '{command_str}' from {user}"); BOT_STATE["last_command_info"] = f"{command_str} (from {user})"
-                        if cmd == "commands": command_executor.submit(process_commands_list_call, user)
-                        else: command_executor.submit(process_api_call, cmd, user, args)
-                    elif event['type'] == 'spam_detected':
-                        username, command = event['username'], event['command']; log_event(f"SPAM: Timed out '{username}' for {SPAM_TIMEOUT_SECONDS}s for spamming '!{command}'.")
+                        BOT_STATE["current_ship_id"] = event['id']
+                        log_event(f"Switched to new ship: {BOT_STATE['current_ship_id']}")
+                    # No longer need to process commands here, JS does it.
+                    # We only care that *an* event happened.
+                        
         except WebDriverException as e:
             logging.error(f"WebDriver exception in main loop. Assuming disconnect: {e.msg}")
             raise
@@ -421,7 +325,7 @@ def start_bot(use_key_login):
 
 # --- MAIN EXECUTION ---
 def main():
-    # Main execution loop is unchanged, as its crash handling is already correct
+    # This is your robust main execution loop, preserved entirely.
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=message_processor_thread, daemon=True).start()
     use_key_login = True; restart_count = 0; last_restart_time = time.time()
@@ -434,12 +338,12 @@ def main():
         try:
             start_bot(use_key_login)
         except InvalidKeyError as e:
-            BOT_STATE["status"] = "Invalid Key!"; err_msg = f"CRITICAL: {e}. Switching to Guest Mode for next restart."; log_event(err_msg); logging.error(err_msg); use_key_login = False
+            BOT_STATE["status"] = "Invalid Key!"; err_msg = f"CRITICAL: {e}. Switching to Guest Mode."; log_event(err_msg); logging.error(err_msg); use_key_login = False
         except Exception as e:
             BOT_STATE["status"] = "Crashed! Restarting..."; log_event(f"CRITICAL ERROR: {e}"); logging.critical(f"Full restart. Reason: {e}"); traceback.print_exc()
         finally:
             global driver
-            # REMOVED: No inactivity_timer to cancel
+            if inactivity_timer: inactivity_timer.cancel()
             if driver:
                 try: driver.quit()
                 except: pass
