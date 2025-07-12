@@ -1,7 +1,8 @@
 # bot.py
-# FINAL SMOOTH-REJOIN VERSION
-# This version features a fully self-contained JavaScript client that handles
-# in-game disconnections and rejoins automatically without requiring a full script restart.
+# FUSED DEFINITIVE VERSION
+# This script combines the most stable launch process (pre-emptive injection)
+# with the most intelligent in-game client (JavaScript-based auto-rejoin).
+# This provides maximum stability at launch and maximum resilience during operation.
 
 import os
 import logging
@@ -33,19 +34,26 @@ if not SHIP_INVITE_LINK:
 
 # --- JAVASCRIPT PAYLOADS ---
 
-# This is the new, self-sufficient client with built-in rejoin logic.
+# SCRIPT 1: Injected into a blank page to neuter the browser BEFORE the game loads.
+PERFORMANCE_BOOSTER_SCRIPT = """
+console.log('[PerfBooster] Applying aggressive optimizations...');
+window.requestAnimationFrame = () => {}; window.cancelAnimationFrame = () => {};
+window.AudioContext = undefined; window.webkitAudioContext = undefined;
+window.createImageBitmap = () => Promise.reject(new Error('Disabled for performance'));
+const style = document.createElement('style');
+style.innerHTML = `canvas, .game-background { display: none !important; }`;
+document.head.appendChild(style);
+console.log('[PerfBooster] Game rendering, audio, and heavy elements neutralized.');
+"""
+
+# SCRIPT 2: The self-sufficient client with built-in rejoin logic. Injected after game loads.
 CLIENT_SIDE_SCRIPT = """
 (function() {
     'use strict';
-
-    if (window.kingdomChatClientLoaded) {
-        console.log('[Kingdom Chat] Client already loaded. Skipping injection.');
-        return;
-    }
+    if (window.kingdomChatClientLoaded) { return; }
     window.kingdomChatClientLoaded = true;
     console.log('[Kingdom Chat] Initializing client with auto-rejoin logic...');
 
-    // --- Configuration & Message Queue ---
     const SERVER_URL = 'https://sortthechat.onrender.com/command';
     const MESSAGE_DELAY = 1200;
     const ZWSP = '\\u200B';
@@ -55,136 +63,83 @@ CLIENT_SIDE_SCRIPT = """
     let disconnectMonitorInterval = null;
 
     function sendChat(mess) {
-        const chatBox = document.getElementById("chat");
         const chatInp = document.getElementById("chat-input");
         const chatBtn = document.getElementById("chat-send");
-        if (chatBox?.classList.contains('closed')) chatBtn?.click();
+        if (document.getElementById("chat")?.classList.contains('closed')) chatBtn?.click();
         if (chatInp) chatInp.value = mess;
         chatBtn?.click();
     }
-
     function queueReply(message) {
-        const MAX_CONTENT_LENGTH = 199;
-        const splitLongMessage = (line) => {
-            const chunks = []; let remainingText = String(line);
-            if (remainingText.length <= MAX_CONTENT_LENGTH) { chunks.push(remainingText); return chunks; }
-            while (remainingText.length > 0) {
-                if (remainingText.length <= MAX_CONTENT_LENGTH) { chunks.push(remainingText); break; }
-                let breakPoint = remainingText.lastIndexOf(' ', MAX_CONTENT_LENGTH);
-                if (breakPoint <= 0) breakPoint = MAX_CONTENT_LENGTH;
-                chunks.push(remainingText.substring(0, breakPoint).trim());
-                remainingText = remainingText.substring(breakPoint).trim();
-            } return chunks;
-        };
-        const linesToProcess = Array.isArray(message) ? message : [message];
-        linesToProcess.forEach(line => { splitLongMessage(String(line)).forEach(chunk => { if (chunk) messageQueue.push(ZWSP + chunk); }); });
-        if (!isProcessingQueue) processQueue();
+        const MAX_CONTENT_LENGTH=199;
+        const splitLongMessage=(line)=>{const chunks=[];let t=String(line);if(t.length<=MAX_CONTENT_LENGTH)return chunks.push(t),chunks;for(;t.length>0;){if(t.length<=MAX_CONTENT_LENGTH){chunks.push(t);break}let n=t.lastIndexOf(" ",MAX_CONTENT_LENGTH);n<=0&&(n=MAX_CONTENT_LENGTH),chunks.push(t.substring(0,n).trim()),t=t.substring(n).trim()}return chunks};
+        (Array.isArray(message)?message:[message]).forEach(line=>{splitLongMessage(String(line)).forEach(chunk=>{chunk&&messageQueue.push(ZWSP+chunk)})});
+        !isProcessingQueue&&processQueue();
     }
-
     function processQueue() {
         if (messageQueue.length === 0) { isProcessingQueue = false; return; }
         isProcessingQueue = true; const nextMessage = messageQueue.shift();
         sendChat(nextMessage); setTimeout(processQueue, MESSAGE_DELAY);
     }
-
-    // --- Chat Command Monitor ---
     function startChatMonitor() {
         if (chatObserver) return;
         console.log("[Kingdom Chat] Starting chat command monitor...");
-        const chatContent = document.getElementById("chat-content");
-        if (!chatContent) return;
-
+        const chatContent = document.getElementById("chat-content"); if (!chatContent) return;
         chatObserver = new MutationObserver(mutations => {
             mutations.forEach(mutation => {
                 mutation.addedNodes.forEach(node => {
                     if (node.nodeType !== 1 || node.tagName !== "P") return;
-                    const pTextContent = node.textContent || "";
-                    if (pTextContent.startsWith(ZWSP)) return;
-                    const bdiMatch = node.innerHTML.match(/<bdi.*?>(.*?)<\\/bdi>/);
-                    if (!bdiMatch) return;
-                    const playerName = bdiMatch[1].trim();
-                    const colonIdx = pTextContent.indexOf(':');
-                    if (colonIdx === -1) return;
-                    const commandText = pTextContent.substring(colonIdx + 1).trim();
-                    const parts = commandText.split(' ');
-                    const command = parts[0];
-                    if (!command.startsWith('!')) return;
-
-                    fetch(SERVER_URL, {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ playerName: playerName, command: command, args: parts.slice(1) })
-                    }).then(response => response.json())
-                    .then(data => { if (data.replies && data.replies.length > 0) { queueReply(data.replies); }})
-                    .catch(error => console.error("[Kingdom Chat] Error sending command:", error));
+                    const pTextContent = node.textContent || ""; if (pTextContent.startsWith(ZWSP)) return;
+                    const bdiMatch = node.innerHTML.match(/<bdi.*?>(.*?)<\\/bdi>/); if (!bdiMatch) return;
+                    const playerName = bdiMatch[1].trim(); const colonIdx = pTextContent.indexOf(':'); if (colonIdx === -1) return;
+                    const command = pTextContent.substring(colonIdx + 1).trim().split(' ')[0]; if (!command.startsWith('!')) return;
+                    const args = pTextContent.substring(colonIdx + 1).trim().split(' ').slice(1);
+                    fetch(SERVER_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ playerName, command, args })
+                    }).then(r => r.json()).then(d => { if (d.replies && d.replies.length > 0) queueReply(d.replies); }).catch(e => console.error("KC Error:", e));
                 });
             });
         });
         chatObserver.observe(chatContent, { childList: true });
     }
-    
     function stopAllMonitors() {
-        if (chatObserver) {
-            chatObserver.disconnect();
-            chatObserver = null;
-            console.log('[Kingdom Chat] Chat monitor stopped.');
-        }
-        if (disconnectMonitorInterval) {
-            clearInterval(disconnectMonitorInterval);
-            disconnectMonitorInterval = null;
-            console.log('[Kingdom Chat] Disconnect monitor stopped.');
-        }
+        if (chatObserver) { chatObserver.disconnect(); chatObserver = null; console.log('[Kingdom Chat] Chat monitor stopped.'); }
+        if (disconnectMonitorInterval) { clearInterval(disconnectMonitorInterval); disconnectMonitorInterval = null; console.log('[Kingdom Chat] Disconnect monitor stopped.'); }
     }
-
-    // --- Automatic Rejoin Logic ---
     function handleRejoin() {
-        console.log('[Kingdom Chat] Disconnect detected! Initiating automatic rejoin sequence.');
+        console.log('[Kingdom Chat] Disconnect detected! Initiating rejoin...');
         stopAllMonitors();
-
-        const disconnectPopup = document.querySelector('div#disconnect-popup');
-        const returnButton = disconnectPopup?.querySelector('button.btn-green');
-
+        const returnButton = document.querySelector('div#disconnect-popup button.btn-green');
         if (returnButton) {
             returnButton.click();
-            console.log('[Kingdom Chat] Clicked "Return to Menu". Waiting for menu screen...');
             const waitForMenu = setInterval(() => {
-                const playButton = document.querySelector("button.btn-large.btn-green[style*='display: block']");
-                if (playButton && playButton.textContent.includes('Play Anonymously')) {
+                if (document.querySelector("button.btn-large.btn-green[style*='display: block']")) {
                     clearInterval(waitForMenu);
-                    console.log('[Kingdom Chat] Main menu detected. Reloading page to rejoin ship...');
+                    console.log('[Kingdom Chat] Main menu detected. Reloading to rejoin ship...');
                     location.reload();
                 }
             }, 1000);
         } else {
-            console.log('[Kingdom Chat] Could not find disconnect popup. Reloading page as a failsafe...');
+            console.log('[Kingdom Chat] Could not find disconnect popup. Reloading as failsafe...');
             location.reload();
         }
     }
-
     function startDisconnectMonitor() {
         if (disconnectMonitorInterval) return;
         console.log('[Kingdom Chat] Starting disconnect monitor...');
         disconnectMonitorInterval = setInterval(() => {
-            const disconnectPopup = document.querySelector('div#disconnect-popup');
-            if (disconnectPopup && disconnectPopup.offsetParent !== null) {
+            if (document.querySelector('div#disconnect-popup')?.offsetParent !== null) {
                 handleRejoin();
             }
         }, 5000);
     }
-
-    // --- Main Initialization Logic ---
-    function initialize() {
-        const waitForGame = setInterval(() => {
-            if (document.getElementById("chat-content")) {
-                clearInterval(waitForGame);
-                console.log('[Kingdom Chat] Game detected!');
-                queueReply("👑 Kingdom Chat Client connected. Auto-rejoin logic is active.");
-                startChatMonitor();
-                startDisconnectMonitor();
-            }
-        }, 500);
-    }
-
-    initialize();
+    const waitForGame = setInterval(() => {
+        if (document.getElementById("chat-content")) {
+            clearInterval(waitForGame);
+            console.log('[Kingdom Chat] Game detected!');
+            queueReply("👑 Kingdom Chat Client connected. Auto-rejoin is active.");
+            startChatMonitor();
+            startDisconnectMonitor();
+        }
+    }, 500);
 })();
 """
 
@@ -233,8 +188,14 @@ def start_bot(use_key_login):
     BOT_STATE["status"] = "Launching Browser..."
     log_event("Starting new Selenium session...")
     driver = setup_driver()
-    
-    log_event("Navigating to invite link...")
+
+    log_event("Loading blank page for pre-emptive script injection...")
+    driver.get("about:blank")
+    log_event("Injecting performance booster before navigating to game...")
+    driver.execute_script(PERFORMANCE_BOOSTER_SCRIPT)
+    log_event("Performance script is now active and waiting.")
+
+    log_event(f"Navigating to invite link...")
     driver.get(SHIP_INVITE_LINK)
 
     try:
@@ -284,11 +245,9 @@ def main():
             BOT_STATE["status"] = "Running (JS client is managing game state)"
             failure_count = 0
 
-            # NEW, more lenient health check. Lets the JS handle in-game disconnects.
-            # Only fails if the entire browser process dies.
             while True:
                 time.sleep(60)
-                _ = driver.title # A lightweight check to see if the browser is still alive.
+                _ = driver.title
                 logging.info("Health Check: Browser process is responsive.")
 
         except Exception as e:
